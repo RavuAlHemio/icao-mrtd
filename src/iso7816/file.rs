@@ -1,3 +1,8 @@
+use pcsc::Card;
+
+use crate::iso7816::apdu::Apdu;
+
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum MetadataEntry {
     FileLengthWithoutStructural { length_bytes: Vec<u8> },
@@ -288,4 +293,9 @@ pub fn decode_metadata_entries(buf: &[u8]) -> Option<Vec<MetadataEntry>> {
     }
 
     Some(entries)
+}
+
+pub fn read_file(card: &Card, machine_readable_name: &str, select_apdu: &Apdu) {
+    // select the card
+    todo!();
 }
