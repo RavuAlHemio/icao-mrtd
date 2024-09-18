@@ -83,54 +83,22 @@ fn main() {
     };
 
     // try reading EF.CardAccess
-    let card_access = communicate(
-        &card,
-        &iso7816::apdu::Apdu {
-            header: iso7816::apdu::CommandHeader {
-                cla: 0x00,
-                ins: 0xA4, // SELECT
-                p1: 0b000_010_00, // select from MF
-                p2: 0b0000_00_00, // return basic metadata, return first or only occurrence
-            },
-            data: iso7816::apdu::Data::BothDataShort {
-                request_data: vec![0x01, 0x1C],
-                response_data_length: 255,
-            },
-        }
-    )
-        .expect("failed to select EF.CardAccess");
-    let card_access_metadata = iso7816::file::decode_metadata_entries(&card_access.data)
-        .expect("failed to decode EF.CardAccess metadata");
-    println!("trailer: 0x{:04X}", card_access.trailer.to_word());
-    if card_access.trailer.to_word() == 0x9000 || card_access.trailer.to_word() == 0x6282 {
-        // try to fish out the length
-        let length_bytes = card_access_metadata
-            .iter()
-            .filter_map(|me| if let iso7816::file::MetadataEntry::FileLengthWithoutStructural { length_bytes } = me { Some(length_bytes) } else { None })
-            .nth(0).expect("EF.CardAccess does not have a length");
-        let mut response_data_length: u16 = 0;
-        for &b in length_bytes {
-            response_data_length = response_data_length.checked_mul(0x100).expect("length too great");
-            response_data_length += u16::from(b);
-        }
-        println!("EF.CardAccess length: {}", response_data_length);
-        let card_access_content = communicate(
-            &card,
-            &iso7816::apdu::Apdu {
-                header: iso7816::apdu::CommandHeader {
-                    cla: 0x00,
-                    ins: 0xB0, // READ BINARY, offset or short EF identifier
-                    p1: 0x00, // offset in curEF, offset 0
-                    p2: 0x00, // continued: offset 0
-                },
-                data: iso7816::apdu::Data::ResponseDataExtended {
-                    response_data_length,
-                },
-            }
-        )
-            .expect("failed to read EF.CardAccess");
-        println!("read EF.CardAccess response: {:?}", card_access_content);
-    }
+    let select_card_access = iso7816::apdu::Apdu {
+        header: iso7816::apdu::CommandHeader {
+            cla: 0x00,
+            ins: 0xA4, // SELECT
+            p1: 0b000_010_00, // select from MF
+            p2: 0b0000_00_00, // return basic metadata, return first or only occurrence
+        },
+        data: iso7816::apdu::Data::BothDataShort {
+            request_data: vec![0x01, 0x1C],
+            response_data_length: 255,
+        },
+    };
+    let card_access = crate::iso7816::file::read_file(&card, &select_card_access)
+        .expect("failed to read EF.CardAccess");
+    println!("card access content:");
+    hexdump(&card_access);
 
     // select application LDS1 eMRTD (A0 00 00 02 47 10 01)
     let select_mf = iso7816::apdu::Apdu {

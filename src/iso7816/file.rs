@@ -1,6 +1,9 @@
+use std::fmt;
+
 use pcsc::Card;
 
-use crate::iso7816::apdu::Apdu;
+use crate::iso7816::apdu;
+use crate::iso7816::card::{CommunicationError, SmartCard};
 
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -183,6 +186,46 @@ impl From<u8> for LifecycleStatus {
     }
 }
 
+#[derive(Debug)]
+pub enum ReadError {
+    SelectCommunication(CommunicationError),
+    SelectFailed(apdu::Response),
+    MetadataDecoding,
+    UnknownLength,
+    ReadCommunication(CommunicationError),
+    ReadFailed(apdu::Response),
+}
+impl fmt::Display for ReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        match self {
+            Self::SelectCommunication(e)
+                => write!(f, "SELECT communication failed: {}", e),
+            Self::SelectFailed(response)
+                => write!(f, "SELECT operation failed with status code 0x{:04X}", response.trailer.to_word()),
+            Self::MetadataDecoding
+                => write!(f, "metadata decoding failed"),
+            Self::UnknownLength
+                => write!(f, "file has unknown length"),
+            Self::ReadCommunication(e)
+                => write!(f, "READ BINARY communication failed: {}", e),
+            Self::ReadFailed(response)
+                => write!(f, "READ BINARY operation failed with status code 0x{:04X}", response.trailer.to_word()),
+        }
+    }
+}
+impl std::error::Error for ReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SelectCommunication(e) => Some(e),
+            Self::SelectFailed(_response) => None,
+            Self::MetadataDecoding => None,
+            Self::UnknownLength => None,
+            Self::ReadCommunication(e) => Some(e),
+            Self::ReadFailed(_response) => None,
+        }
+    }
+}
+
 pub fn decode_metadata_entries(buf: &[u8]) -> Option<Vec<MetadataEntry>> {
     let mut remaining_slice = buf;
 
@@ -295,7 +338,44 @@ pub fn decode_metadata_entries(buf: &[u8]) -> Option<Vec<MetadataEntry>> {
     Some(entries)
 }
 
-pub fn read_file(card: &Card, machine_readable_name: &str, select_apdu: &Apdu) {
+pub fn read_file(card: &Card, select_apdu: &apdu::Apdu) -> Result<Vec<u8>, ReadError> {
+    use crate::iso7816::file::MetadataEntry;
+
     // select the card
-    todo!();
+    let select_response = card.communicate(select_apdu)
+        .map_err(|e| ReadError::SelectCommunication(e))?;
+    let file_metadata = crate::iso7816::file::decode_metadata_entries(&select_response.data)
+        .ok_or(ReadError::MetadataDecoding)?;
+    if select_response.trailer.to_word() != 0x9000 && select_response.trailer.to_word() != 0x6282 {
+        return Err(ReadError::SelectFailed(select_response));
+    }
+
+    // try to fish out the length
+    let length_bytes = file_metadata
+        .iter()
+        .filter_map(|me| if let MetadataEntry::FileLengthWithoutStructural { length_bytes } = me { Some(length_bytes) } else { None })
+        .nth(0).ok_or(ReadError::UnknownLength)?;
+    let mut response_data_length: u16 = 0;
+    for &b in length_bytes {
+        response_data_length = response_data_length.checked_mul(0x100).expect("length too great");
+        response_data_length += u16::from(b);
+    }
+    let read_response = card.communicate(
+        &apdu::Apdu {
+            header: apdu::CommandHeader {
+                cla: 0x00,
+                ins: 0xB0, // READ BINARY, offset or short EF identifier
+                p1: 0x00, // offset in curEF, offset 0
+                p2: 0x00, // continued: offset 0
+            },
+            data: apdu::Data::ResponseDataExtended {
+                response_data_length,
+            },
+        }
+    )
+        .map_err(|e| ReadError::ReadCommunication(e))?;
+    if read_response.trailer.to_word() != 0x9000 {
+        return Err(ReadError::ReadFailed(read_response));
+    }
+    Ok(read_response.data)
 }
