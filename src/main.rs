@@ -102,8 +102,9 @@ fn main() {
     let mut authenticated = false;
     match crate::iso7816::file::read_file(&card, &select_card_access) {
         Ok(card_access) => {
-            authenticated = establish_pace(&card, &card_access)
+            crate::pace::establish(&card, &card_access)
                 .expect("failed to establish PACE");
+            authenticated = true;
         },
         Err(crate::iso7816::file::ReadError::FileNotFound) => {
             // fall through to Basic Access Control
@@ -117,21 +118,6 @@ fn main() {
         authenticated = establish_bac(&card)
             .expect("failed to establish BAC");
     }
-}
-
-/// Authenticates with the card using PACE. Returns whether authentication succeeded.
-fn establish_pace(card: &pcsc::Card, card_access: &[u8]) -> Result<bool, Infallible> {
-    // decode card_access
-    let security_infos: crate::pace::asn1::SecurityInfos = rasn::der::decode(card_access)
-        .expect("failed to decode EF.CardAccess");
-    let security_infos_vec = security_infos.0.to_vec();
-    for security_info_any in security_infos_vec {
-        println!("{:?}", security_info_any.as_bytes());
-        let security_info: crate::pace::asn1::SecurityInfo = rasn::der::decode(security_info_any.as_bytes())
-            .expect("failed to decode SecurityInfo item");
-        println!("{:#?}", security_info);
-    }
-    Ok(false)
 }
 
 /// Authenticates with the card using BAC. Returns whether authentication succeded.

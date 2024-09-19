@@ -2,44 +2,17 @@
 
 
 use rasn::{AsnType, Decode, Encode};
-use rasn::types::{Any, Integer, ObjectIdentifier, SetOf};
+use rasn::types::{Any, Integer, ObjectIdentifier};
 
-
-/// Security information stored in the `EF.CardAccess` file on the travel document chip.
-///
-/// Each item can be decoded as [`SecurityInfo`] to identify the underlying protocol. Concrete
-/// implementations are provided for [`PaceInfo`] and [`PaceDomainParameterInfo`].
-///
-/// Specified in ICAO Doc 9303 Part 11 § 9.2.
-#[derive(AsnType, Clone, Debug, Decode, Encode, Eq, Hash, PartialEq)]
-#[rasn(delegate)]
-pub struct SecurityInfos(pub SetOf<Any>);
-
-
-/// An item of security information in the `EF.CardAccess` file on the travel document chip.
-///
-/// Each item of security information will have additional information following `protocol` which is
-/// specific to that `protocol`. This type is kept deliberately generic to allow protocol detection.
-///
-/// Specified in ICAO Doc 9303 Part 11 § 9.2.
-#[derive(AsnType, Clone, Debug, Decode, Encode, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SecurityInfo {
-    pub protocol: ObjectIdentifier,
-    // requiredData ANY DEFINED BY protocol,
-    // optionalData ANY DEFINED BY protocol OPTIONAL,
-}
-impl SecurityInfo {
-    pub fn new(
-        protocol: ObjectIdentifier,
-    ) -> Self {
-        Self {
-            protocol,
-        }
-    }
-}
 
 /// An item of PACE-related security information in the `EF.CardAccess` file on the travel document
 /// chip.
+///
+/// The content of `EF.CardAccess` is a SET OF such structures; the first item is always an OID
+/// specifying the protocol, but non-`PaceInfo` items need not adhere to this structure, so it is
+/// necessary to ensure that a `PaceInfo` structure is being decoded. It is therefore recommended
+/// to first decode `EF.CardAccess` as a `SetOf<Any>`, then each entry as a `Vec<Any>`, then each
+/// entry's first member as an `ObjectIdentifier`.
 ///
 /// Specified in ICAO Doc 9303 Part 11 § 9.2.1.
 #[derive(AsnType, Clone, Debug, Decode, Encode, Eq, Hash, Ord, PartialEq, PartialOrd)]
