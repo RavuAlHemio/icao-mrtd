@@ -16,7 +16,6 @@ use rasn::types::{Any, Integer, ObjectIdentifier};
 ///
 /// Specified in ICAO Doc 9303 Part 11 § 9.2.1.
 #[derive(AsnType, Clone, Debug, Decode, Encode, Eq, Hash, Ord, PartialEq, PartialOrd)]
-#[rasn(automatic_tags)]
 pub struct PaceInfo {
     pub protocol: ObjectIdentifier,
     pub version: Integer,
