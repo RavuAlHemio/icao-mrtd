@@ -1,5 +1,8 @@
 mod iso7816;
+mod pace;
 
+
+use std::convert::Infallible;
 
 use clap::Parser;
 use pcsc;
@@ -95,53 +98,44 @@ fn main() {
             response_data_length: 255,
         },
     };
-    let card_access = crate::iso7816::file::read_file(&card, &select_card_access)
-        .expect("failed to read EF.CardAccess");
-    println!("card access content:");
-    hexdump(&card_access);
 
-    // select application LDS1 eMRTD (A0 00 00 02 47 10 01)
-    let select_mf = iso7816::apdu::Apdu {
-        header: iso7816::apdu::CommandHeader {
-            cla: 0x00,
-            ins: 0xA4, // SELECT
-            p1: 0b000_001_00, // select by DF name
-            p2: 0b0000_00_00, // return FCI template, return first or only occurrence
+    let mut authenticated = false;
+    match crate::iso7816::file::read_file(&card, &select_card_access) {
+        Ok(card_access) => {
+            authenticated = establish_pace(&card, &card_access)
+                .expect("failed to establish PACE");
         },
-        data: iso7816::apdu::Data::BothDataShort {
-            request_data: vec![0xA0, 0x00, 0x00, 0x02, 0x47, 0x10, 0x01],
-            response_data_length: 0,
+        Err(crate::iso7816::file::ReadError::FileNotFound) => {
+            // fall through to Basic Access Control
+        },
+        Err(e) => {
+            panic!("failed to read EF.CardAccess: {}", e);
         },
     };
-    let mut out_buf = Vec::new();
-    select_mf.write_bytes(&mut out_buf)
-        .expect("failed to prepare SELECT LDS1 eMRTD buffer");
-    let mut in_buf = [0u8; 256 + 2];
 
-    let in_slice = card.transmit(&out_buf, &mut in_buf)
-        .expect("failed to transmit SELECT LDS1 eMRTD");
-    println!("SELECT LDS1 eMRTD response:");
-    hexdump(&in_slice);
+    if !authenticated {
+        authenticated = establish_bac(&card)
+            .expect("failed to establish BAC");
+    }
+}
 
-    // select EF.COM file
-    let select_mf = iso7816::apdu::Apdu {
-        header: iso7816::apdu::CommandHeader {
-            cla: 0x00,
-            ins: 0xA4, // SELECT
-            p1: 0b000_000_10, // select EF under current DF
-            p2: 0b0000_11_00, // return no metadata, return first or only occurrence
-        },
-        data: iso7816::apdu::Data::RequestDataShort {
-            request_data: vec![0x01, 0x1E], // EF.COM
-        },
-    };
-    let mut out_buf = Vec::new();
-    select_mf.write_bytes(&mut out_buf)
-        .expect("failed to prepare SELECT EF.COM buffer");
-    let mut in_buf = [0u8; 2];
+/// Authenticates with the card using PACE. Returns whether authentication succeeded.
+fn establish_pace(card: &pcsc::Card, card_access: &[u8]) -> Result<bool, Infallible> {
+    // decode card_access
+    let security_infos: crate::pace::asn1::SecurityInfos = rasn::der::decode(card_access)
+        .expect("failed to decode EF.CardAccess");
+    let security_infos_vec = security_infos.0.to_vec();
+    for security_info_any in security_infos_vec {
+        println!("{:?}", security_info_any.as_bytes());
+        let security_info: crate::pace::asn1::SecurityInfo = rasn::der::decode(security_info_any.as_bytes())
+            .expect("failed to decode SecurityInfo item");
+        println!("{:#?}", security_info);
+    }
+    Ok(false)
+}
 
-    let in_slice = card.transmit(&out_buf, &mut in_buf)
-        .expect("failed to transmit SELECT EF.COM");
-    println!("SELECT EF.COM response:");
-    hexdump(&in_slice);
+/// Authenticates with the card using BAC. Returns whether authentication succeded.
+fn establish_bac(card: &pcsc::Card) -> Result<bool, Infallible> {
+    // TODO
+    Ok(false)
 }

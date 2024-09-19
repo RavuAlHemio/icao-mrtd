@@ -189,6 +189,7 @@ impl From<u8> for LifecycleStatus {
 #[derive(Debug)]
 pub enum ReadError {
     SelectCommunication(CommunicationError),
+    FileNotFound,
     SelectFailed(apdu::Response),
     MetadataDecoding,
     UnknownLength,
@@ -200,6 +201,8 @@ impl fmt::Display for ReadError {
         match self {
             Self::SelectCommunication(e)
                 => write!(f, "SELECT communication failed: {}", e),
+            Self::FileNotFound
+                => write!(f, "file not found"),
             Self::SelectFailed(response)
                 => write!(f, "SELECT operation failed with status code 0x{:04X}", response.trailer.to_word()),
             Self::MetadataDecoding
@@ -217,6 +220,7 @@ impl std::error::Error for ReadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::SelectCommunication(e) => Some(e),
+            Self::FileNotFound => None,
             Self::SelectFailed(_response) => None,
             Self::MetadataDecoding => None,
             Self::UnknownLength => None,
@@ -341,14 +345,17 @@ pub fn decode_metadata_entries(buf: &[u8]) -> Option<Vec<MetadataEntry>> {
 pub fn read_file(card: &Card, select_apdu: &apdu::Apdu) -> Result<Vec<u8>, ReadError> {
     use crate::iso7816::file::MetadataEntry;
 
-    // select the card
+    // select the file
     let select_response = card.communicate(select_apdu)
         .map_err(|e| ReadError::SelectCommunication(e))?;
-    let file_metadata = crate::iso7816::file::decode_metadata_entries(&select_response.data)
-        .ok_or(ReadError::MetadataDecoding)?;
+    if select_response.trailer.to_word() == 0x6A82 {
+        return Err(ReadError::FileNotFound);
+    }
     if select_response.trailer.to_word() != 0x9000 && select_response.trailer.to_word() != 0x6282 {
         return Err(ReadError::SelectFailed(select_response));
     }
+    let file_metadata = crate::iso7816::file::decode_metadata_entries(&select_response.data)
+        .ok_or(ReadError::MetadataDecoding)?;
 
     // try to fish out the length
     let length_bytes = file_metadata
