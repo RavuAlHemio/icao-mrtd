@@ -1,4 +1,6 @@
+mod bac;
 mod iso7816;
+mod mrz;
 mod pace;
 
 
