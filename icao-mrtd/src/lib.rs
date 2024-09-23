@@ -2,6 +2,7 @@ pub mod bac;
 pub mod iso7816;
 pub mod mrz;
 pub mod pace;
+pub mod secure_messaging;
 
 
 pub fn hexdump(buf: &[u8]) {

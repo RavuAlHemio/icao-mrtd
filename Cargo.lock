@@ -3,6 +3,17 @@
 version = 3
 
 [[package]]
+name = "aes"
+version = "0.9.0-pre.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7856582c758ade85d71daf27ec6bcea6c1c73913692b07b8dffea2dc03531c9"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -208,6 +219,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1462739cb27611015575c0c11df5df7601141071f07518d56fcc1be504cbec97"
 
 [[package]]
+name = "cmac"
+version = "0.8.0-pre.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02a53c8815f718726c448e4e83b86806245fb37bfaa82ad50893d9f01ad3a503"
+dependencies = [
+ "cipher",
+ "dbl",
+ "digest",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -268,6 +290,15 @@ dependencies = [
  "getrandom",
  "hybrid-array",
  "rand_core",
+]
+
+[[package]]
+name = "dbl"
+version = "0.4.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb19b576f7e885fac6667774f906b150c9e4df82ed8974d5a99a82bdbee946a8"
+dependencies = [
+ "hybrid-array",
 ]
 
 [[package]]
@@ -360,9 +391,11 @@ dependencies = [
 name = "icao-mrtd"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "block-padding",
  "cbc",
  "cipher",
+ "cmac",
  "des",
  "digest",
  "hex-literal",
@@ -374,6 +407,7 @@ dependencies = [
  "sha2",
  "smallstr",
  "smallvec",
+ "subtle",
 ]
 
 [[package]]
