@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::bac;
 use crate::iso7816::apdu;
 
 
@@ -8,6 +9,7 @@ pub enum CommunicationError {
     Write(apdu::WriteError),
     Pcsc(pcsc::Error),
     ShortResponse,
+    Bac(bac::Error),
 }
 impl fmt::Display for CommunicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -15,6 +17,7 @@ impl fmt::Display for CommunicationError {
             Self::Write(e) => write!(f, "APDU write error: {}", e),
             Self::Pcsc(e) => write!(f, "PCSC error: {}", e),
             Self::ShortResponse => write!(f, "response too short"),
+            Self::Bac(e) => write!(f, "BAC error: {}", e),
         }
     }
 }
@@ -24,6 +27,7 @@ impl std::error::Error for CommunicationError {
             Self::Write(e) => Some(e),
             Self::Pcsc(e) => Some(e),
             Self::ShortResponse => None,
+            Self::Bac(e) => Some(e),
         }
     }
 }
@@ -33,15 +37,18 @@ impl From<apdu::WriteError> for CommunicationError {
 impl From<pcsc::Error> for CommunicationError {
     fn from(value: pcsc::Error) -> Self { Self::Pcsc(value) }
 }
+impl From<bac::Error> for CommunicationError {
+    fn from(value: bac::Error) -> Self { Self::Bac(value) }
+}
 
 
 /// A smart card compatible with ISO/IEC 7816.
 pub trait SmartCard {
     /// Send a request APDU to the smart card and receive a response APDU.
-    fn communicate(&self, request: &apdu::Apdu) -> Result<apdu::Response, CommunicationError>;
+    fn communicate(&mut self, request: &apdu::Apdu) -> Result<apdu::Response, CommunicationError>;
 }
 impl SmartCard for pcsc::Card {
-    fn communicate(&self, request: &apdu::Apdu) -> Result<apdu::Response, CommunicationError> {
+    fn communicate(&mut self, request: &apdu::Apdu) -> Result<apdu::Response, CommunicationError> {
         let mut out_buf = Vec::new();
         request.write_bytes(&mut out_buf)?;
         let mut in_buf = vec![0u8; request.data.response_data_length() + 2];

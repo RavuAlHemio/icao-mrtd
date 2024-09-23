@@ -29,26 +29,28 @@ pub trait Kdf<K> {
 
 /// Key derivation function for 3DES.
 ///
-/// PACE uses 3DES in two-key mode, i.e. `K3 = K1`.
+/// PACE uses 3DES in EDE two-key mode, i.e. `K3 = K1`.
 ///
 /// The KDF is equivalent to:
 /// ```plain
-/// keydataA = sha1(key || counter)[0..8]
-/// keydataB = sha1(key || counter)[8..16]
+/// keydata = sha1(key || counter)[0..16]
+/// ```
+/// whereupon
+/// ```plain
+/// K1 = keydata[0..8]
+/// K2 = keydata[8..16]
 /// ```
 pub struct Kdf3Des;
-impl Kdf<([u8; 8], [u8; 8])> for Kdf3Des {
-    fn derive_key(key_seed: &[u8], counter: u32) -> ([u8; 8], [u8; 8]) {
+impl Kdf<[u8; 16]> for Kdf3Des {
+    fn derive_key(key_seed: &[u8], counter: u32) -> [u8; 16] {
         let mut hasher = Sha1::new();
         hasher.update(key_seed);
         hasher.update(&counter.to_be_bytes());
         let result = hasher.finalize();
     
-        let mut keydata_a = [0u8; 8];
-        let mut keydata_b = [0u8; 8];
-        keydata_a.copy_from_slice(&result[0..8]);
-        keydata_b.copy_from_slice(&result[8..16]);
-        (keydata_a, keydata_b)
+        let mut keydata = [0u8; 16];
+        keydata.copy_from_slice(&result[0..16]);
+        keydata
     }
 }
 
@@ -60,7 +62,7 @@ impl Kdf<([u8; 8], [u8; 8])> for Kdf3Des {
 /// keydata = sha1(key || counter)[0..16]
 /// ```
 pub struct KdfAes128;
-impl Kdf<[u8; 16]> for Kdf3Des {
+impl Kdf<[u8; 16]> for KdfAes128 {
     fn derive_key(key_seed: &[u8], counter: u32) -> [u8; 16] {
         let mut hasher = Sha1::new();
         hasher.update(key_seed);
@@ -81,7 +83,7 @@ impl Kdf<[u8; 16]> for Kdf3Des {
 /// keydata = sha256(key || counter)[0..24]
 /// ```
 pub struct KdfAes192;
-impl Kdf<[u8; 24]> for Kdf3Des {
+impl Kdf<[u8; 24]> for KdfAes192 {
     fn derive_key(key_seed: &[u8], counter: u32) -> [u8; 24] {
         let mut hasher = Sha256::new();
         hasher.update(key_seed);
@@ -102,7 +104,7 @@ impl Kdf<[u8; 24]> for Kdf3Des {
 /// keydata = sha256(key || counter)
 /// ```
 pub struct KdfAes256;
-impl Kdf<[u8; 32]> for Kdf3Des {
+impl Kdf<[u8; 32]> for KdfAes256 {
     fn derive_key(key_seed: &[u8], counter: u32) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(key_seed);

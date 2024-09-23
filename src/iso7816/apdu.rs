@@ -112,6 +112,18 @@ impl Data {
         }
     }
 
+    pub fn request_data(&self) -> Option<&[u8]> {
+        match self {
+            Self::NoData => None,
+            Self::RequestDataShort { request_data } => Some(request_data.as_slice()),
+            Self::RequestDataExtended { request_data } => Some(request_data.as_slice()),
+            Self::ResponseDataShort { .. } => None,
+            Self::ResponseDataExtended { .. } => None,
+            Self::BothDataShort { request_data, .. } => Some(request_data.as_slice()),
+            Self::BothDataExtended { request_data, .. } => Some(request_data.as_slice()),
+        }
+    }
+
     pub fn write_bytes<W: Write>(&self, writer: &mut W) -> Result<(), WriteError> {
         fn ensure_not_empty(request_data: &Vec<u8>) -> Result<(), WriteError> {
             if request_data.len() == 0 {
