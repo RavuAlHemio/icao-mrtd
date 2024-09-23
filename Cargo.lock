@@ -342,6 +342,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex-literal"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
+
+[[package]]
 name = "hybrid-array"
 version = "0.2.0-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -357,9 +363,9 @@ dependencies = [
  "block-padding",
  "cbc",
  "cipher",
- "clap",
  "des",
  "digest",
+ "hex-literal",
  "pcsc",
  "rand",
  "rasn",
@@ -438,6 +444,15 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "mrtd-tool"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "icao-mrtd",
+ "pcsc",
+]
 
 [[package]]
 name = "nom"
@@ -632,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "retail-mac"
-version = "0.2.0-pre.2"
+version = "0.1.0"
 dependencies = [
  "cipher",
  "digest",

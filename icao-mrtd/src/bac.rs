@@ -57,6 +57,7 @@ pub enum Error {
     MissingResponseData,
     MissingResponseStatus,
     StatusLength { obtained: Vec<u8> },
+    UnknownPadding { padding_mode: u8 },
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -79,6 +80,8 @@ impl fmt::Display for Error {
                 => write!(f, "response does not contain status"),
             Self::StatusLength { obtained }
                 => write!(f, "status has unexpected length {}", obtained.len()),
+            Self::UnknownPadding { padding_mode }
+                => write!(f, "response payload has unknown padding mode {}", padding_mode),
         }
     }
 }
@@ -94,6 +97,7 @@ impl std::error::Error for Error {
             Self::MissingResponseData => None,
             Self::MissingResponseStatus => None,
             Self::StatusLength { .. } => None,
+            Self::UnknownPadding { .. } => None,
         }
     }
 }
@@ -250,9 +254,7 @@ impl<'c, SC: SmartCard> SmartCard for BacCard<'c, SC> {
         }
 
         // finally talk to the smart card
-        println!("sending to card: {:#?}", my_request);
         let response = self.card.communicate(&my_request)?;
-        println!("obtained from card: {:#?}", response);
 
         // decode the raw response
         let mut received_fields = Vec::new();
@@ -293,9 +295,14 @@ impl<'c, SC: SmartCard> SmartCard for BacCard<'c, SC> {
             return Err(Error::MissingResponseMac.into());
         };
 
+        // increment the SSC
+        self.increment_send_sequence_counter();
+
         // verify MAC
         let mut received_retail_mac = RetailMacDes::new_from_slice(&self.k_session_mac).unwrap();
         let mut written_count = 0;
+        DynDigest::update(&mut received_retail_mac, &self.send_sequence_counter);
+        written_count += self.send_sequence_counter.len();
         for field in &received_mac_fields {
             DynDigest::update(&mut received_retail_mac, field.tag_and_length);
             DynDigest::update(&mut received_retail_mac, field.data);
@@ -311,15 +318,35 @@ impl<'c, SC: SmartCard> SmartCard for BacCard<'c, SC> {
             .map_err(|_| Error::ResponseMac)?;
 
         // extract the actual response data
-        let actual_response = received_mac_fields.iter()
-            .filter(|tlv| tlv.tag_and_length[0] == 0x87)
-            .nth(0).ok_or(Error::MissingResponseData)?;
+        let actual_response_data = if request.data.response_data_length().is_none() {
+            Vec::with_capacity(0)
+        } else {
+            let actual_response = received_mac_fields.iter()
+                .filter(|tlv| tlv.tag_and_length[0] == 0x87)
+                .nth(0).ok_or(Error::MissingResponseData)?;
+
+            if actual_response.data.len() == 0 {
+                return Err(Error::MissingResponseData.into());
+            }
+            if actual_response.data[0] != 0x01 {
+                // not ISO 7816 padding
+                return Err(Error::UnknownPadding { padding_mode: actual_response.data[0] }.into());
+            }
+            let mut encrypted_data = actual_response.data[1..].to_vec();
+            let iv = [0u8; 8];
+            let decryptor: cbc::Decryptor<TdesEde2> = cbc::Decryptor::new(&self.k_session_enc.into(), &iv.into());
+            let decrypted_slice = decryptor.decrypt_padded::<Iso7816>(encrypted_data.as_mut_slice()).unwrap();
+
+            println!("decrypted data:");
+            crate::hexdump(decrypted_slice);
+            decrypted_slice.to_vec()
+        };
         let actual_status = received_mac_fields.iter()
             .filter(|tlv| tlv.tag_and_length[0] == 0x99)
             .nth(0).ok_or(Error::MissingResponseStatus)?;
 
         let response = Response {
-            data: actual_response.data.to_vec(),
+            data: actual_response_data,
             trailer: ResponseTrailer {
                 sw1: actual_status.data[0],
                 sw2: actual_status.data[1],
@@ -358,26 +385,17 @@ fn get_challenge<SC: SmartCard>(card: &mut SC) -> Result<[u8; 8], CommunicationE
     Ok(ret)
 }
 
-pub fn establish<'c, SC: SmartCard>(card: &'c mut SC, mrz_data: &[u8]) -> Result<BacCard<'c, SC>, CommunicationError> {
-    // calculate SHA-1 hash of MRZ data
-    let mut sha1 = Sha1::new();
-    Digest::update(&mut sha1, mrz_data);
-    let sha1_hash = sha1.finalize();
-    let k_seed = &sha1_hash[0..16];
-
+pub fn establish_from_values<'c, SC: SmartCard>(
+    card: &'c mut SC,
+    k_seed: &[u8],
+    rnd_ic: &[u8],
+    rnd_ifd: &[u8],
+    k_ifd: &[u8],
+) -> Result<BacCard<'c, SC>, CommunicationError> {
     // derive the keys
     // (the key derivation functions have remained the same with PACE)
     let k_enc = Kdf3Des::derive_encryption_key(k_seed);
     let k_mac = Kdf3Des::derive_mac_key(k_seed);
-
-    // obtain the challenge
-    let rnd_ic = get_challenge(card)?;
-
-    // generate some random bytes
-    let mut rnd_ifd = [0u8; 8];
-    let mut k_ifd = [0u8; 16];
-    OsRng.fill_bytes(&mut rnd_ifd);
-    OsRng.fill_bytes(&mut k_ifd);
 
     // concatenate the three values
     let mut ext_auth_data = [0u8; 32+8];
@@ -456,7 +474,7 @@ pub fn establish<'c, SC: SmartCard>(card: &'c mut SC, mrz_data: &[u8]) -> Result
     }
 
     let mut k_session_seed = [0u8; 16];
-    for ((kss, kifd), kic) in k_session_seed.iter_mut().zip(rnd_ifd.iter()).zip(rnd_ic.iter()) {
+    for ((kss, kifd), kic) in k_session_seed.iter_mut().zip(k_ifd.iter()).zip(k_ic.iter()) {
         *kss = *kifd ^ *kic;
     }
 
@@ -473,4 +491,23 @@ pub fn establish<'c, SC: SmartCard>(card: &'c mut SC, mrz_data: &[u8]) -> Result
         k_session_mac,
         send_sequence_counter,
     })
+}
+
+pub fn establish<'c, SC: SmartCard>(card: &'c mut SC, mrz_data: &[u8]) -> Result<BacCard<'c, SC>, CommunicationError> {
+    // calculate SHA-1 hash of MRZ data
+    let mut sha1 = Sha1::new();
+    Digest::update(&mut sha1, mrz_data);
+    let sha1_hash = sha1.finalize();
+    let k_seed = &sha1_hash[0..16];
+
+    // obtain the challenge
+    let rnd_ic = get_challenge(card)?;
+
+    // generate some random bytes
+    let mut rnd_ifd = [0u8; 8];
+    let mut k_ifd = [0u8; 16];
+    OsRng.fill_bytes(&mut rnd_ifd);
+    OsRng.fill_bytes(&mut k_ifd);
+
+    establish_from_values(card, k_seed, &rnd_ic, &rnd_ifd, &k_ifd)
 }

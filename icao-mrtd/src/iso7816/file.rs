@@ -1,7 +1,5 @@
 use std::fmt;
 
-use pcsc::Card;
-
 use crate::iso7816::apdu;
 use crate::iso7816::card::{CommunicationError, SmartCard};
 

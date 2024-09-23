@@ -1,13 +1,7 @@
-mod bac;
-mod iso7816;
-mod mrz;
-mod pace;
-
-
 use std::path::PathBuf;
 
 use clap::Parser;
-use iso7816::card::SmartCard;
+use icao_mrtd::iso7816::card::SmartCard;
 use pcsc;
 
 
@@ -26,38 +20,6 @@ struct ReadOpts {
     pub mrz_path: PathBuf,
 }
 
-
-fn hexdump(buf: &[u8]) {
-    let mut offset = 0;
-    while offset < buf.len() {
-        print!("{:08X}  ", offset);
-
-        for i in 0..16 {
-            if offset + i < buf.len() {
-                print!(" {:02X}", buf[offset + i]);
-            } else {
-                print!("   ");
-            }
-        }
-
-        print!(" |");
-        for i in 0..16 {
-            if offset + i >= buf.len() {
-                break;
-            }
-
-            let b = buf[offset + i];
-            if b >= b' ' && b <= b'~' {
-                print!("{}", char::from_u32(b.into()).unwrap());
-            } else {
-                print!(".");
-            }
-        }
-        println!("|");
-
-        offset += 16;
-    }
-}
 
 
 fn main() {
@@ -97,7 +59,7 @@ fn main() {
     };
 
     // parse the MRZ
-    let mrz: crate::mrz::Data = mrz_string.parse()
+    let mrz: icao_mrtd::mrz::Data = mrz_string.parse()
         .expect("failed to parse MRZ");
     println!("MRZ validity check:");
     println!("  document no.: {}", mrz.is_document_number_valid());
@@ -138,14 +100,14 @@ fn main() {
     */
 
     // select eMRTD Application
-    let select_emrtd_app = iso7816::apdu::Apdu {
-        header: iso7816::apdu::CommandHeader {
+    let select_emrtd_app = icao_mrtd::iso7816::apdu::Apdu {
+        header: icao_mrtd::iso7816::apdu::CommandHeader {
             cla: 0x00,
             ins: 0xA4, // SELECT
             p1: 0b000_001_00, // select by DF name (application identifier)
             p2: 0b0000_11_00, // return no metadata, return first or only occurrence
         },
-        data: iso7816::apdu::Data::RequestDataShort {
+        data: icao_mrtd::iso7816::apdu::Data::RequestDataShort {
             request_data: vec![0xA0, 0x00, 0x00, 0x02, 0x47, 0x10, 0x01],
         },
     };
@@ -155,7 +117,7 @@ fn main() {
         panic!("obtained response 0x{:04X} when SELECTing eMRTD Application", response.trailer.to_word());
     }
 
-    let mut bac = crate::bac::establish(&mut card, mrz.mrz_key().as_bytes())
+    let mut bac = icao_mrtd::bac::establish(&mut card, mrz.mrz_key().as_bytes())
         .expect("failed to establish BAC");
 
     /*
@@ -184,21 +146,21 @@ fn main() {
     */
 
     // try reading EF.COM through the encrypted channel
-    let select_com = iso7816::apdu::Apdu {
-        header: iso7816::apdu::CommandHeader {
+    let select_com = icao_mrtd::iso7816::apdu::Apdu {
+        header: icao_mrtd::iso7816::apdu::CommandHeader {
             cla: 0x00,
             ins: 0xA4, // SELECT
             p1: 0b000_000_10, // select EF under current DF
             p2: 0b0000_11_00, // return no metadata, return first or only occurrence
         },
-        data: iso7816::apdu::Data::RequestDataShort {
+        data: icao_mrtd::iso7816::apdu::Data::RequestDataShort {
             request_data: vec![0x01, 0x1E],
         },
     };
-    match crate::iso7816::file::read_file(&mut bac, &select_com) {
+    match icao_mrtd::iso7816::file::read_file(&mut bac, &select_com) {
         Ok(com) => {
             println!("EF.COM:");
-            hexdump(&com);
+            icao_mrtd::hexdump(&com);
         },
         Err(e) => {
             panic!("failed to read EF.COM: {}", e);

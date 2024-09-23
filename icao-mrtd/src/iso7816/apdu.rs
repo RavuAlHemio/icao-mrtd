@@ -34,7 +34,7 @@ impl From<io::Error> for WriteError {
 }
 
 
-#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CommandHeader {
     pub cla: u8,
     pub ins: u8,
@@ -46,19 +46,42 @@ impl CommandHeader {
         [self.cla, self.ins, self.p1, self.p2]
     }
 
+    pub const fn to_be_u32(&self) -> u32 {
+        ((self.cla as u32) << 24)
+        | ((self.ins as u32) << 16)
+        | ((self.p1 as u32) <<  8)
+        | ((self.p2 as u32) <<  0)
+    }
+
     pub fn write_bytes<W: Write>(&self, writer: &mut W) -> Result<(), WriteError> {
         let bytes = self.to_bytes();
         writer.write_all(&bytes)?;
         Ok(())
     }
 }
+impl fmt::Debug for CommandHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "CommandHeader {} cla: 0x{:02X}, ins: 0x{:02X}, p1: 0x{:02X}, p2: 0x{:02X} {}",
+            '{', self.cla, self.ins, self.p1, self.p2, '}',
+        )
+    }
+}
 
-#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ResponseTrailer {
     pub sw1: u8,
     pub sw2: u8,
 }
 impl ResponseTrailer {
+    pub const fn new(sw1: u8, sw2: u8) -> Self {
+        Self {
+            sw1,
+            sw2,
+        }
+    }
+
     pub const fn to_bytes(&self) -> [u8; 2] {
         [self.sw1, self.sw2]
     }
@@ -71,6 +94,11 @@ impl ResponseTrailer {
         let bytes = self.to_bytes();
         writer.write_all(&bytes)?;
         Ok(())
+    }
+}
+impl fmt::Debug for ResponseTrailer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ResponseTrailer {} sw1: 0x{:02X}, sw2: 0x{:02X} {}", '{', self.sw1, self.sw2, '}')
     }
 }
 
@@ -100,15 +128,15 @@ pub enum Data {
     },
 }
 impl Data {
-    pub fn response_data_length(&self) -> usize {
+    pub fn response_data_length(&self) -> Option<usize> {
         match self {
-            Self::NoData => 0,
-            Self::RequestDataShort { .. } => 0,
-            Self::RequestDataExtended { .. } => 0,
-            Self::ResponseDataShort { response_data_length } => (*response_data_length).try_into().unwrap(),
-            Self::ResponseDataExtended { response_data_length } => (*response_data_length).try_into().unwrap(),
-            Self::BothDataShort { response_data_length, .. } => (*response_data_length).try_into().unwrap(),
-            Self::BothDataExtended { response_data_length, .. } => (*response_data_length).try_into().unwrap(),
+            Self::NoData => None,
+            Self::RequestDataShort { .. } => None,
+            Self::RequestDataExtended { .. } => None,
+            Self::ResponseDataShort { response_data_length } => Some((*response_data_length).try_into().unwrap()),
+            Self::ResponseDataExtended { response_data_length } => Some((*response_data_length).try_into().unwrap()),
+            Self::BothDataShort { response_data_length, .. } => Some((*response_data_length).try_into().unwrap()),
+            Self::BothDataExtended { response_data_length, .. } => Some((*response_data_length).try_into().unwrap()),
         }
     }
 

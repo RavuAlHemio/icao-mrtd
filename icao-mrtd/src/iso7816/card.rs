@@ -51,8 +51,12 @@ impl SmartCard for pcsc::Card {
     fn communicate(&mut self, request: &apdu::Apdu) -> Result<apdu::Response, CommunicationError> {
         let mut out_buf = Vec::new();
         request.write_bytes(&mut out_buf)?;
-        let mut in_buf = vec![0u8; request.data.response_data_length() + 2];
+        println!("sending to card:");
+        crate::hexdump(&out_buf);
+        let mut in_buf = vec![0u8; request.data.response_data_length().unwrap_or(0) + 2];
         let in_slice = self.transmit(&out_buf, &mut in_buf)?;
+        println!("received from card:");
+        crate::hexdump(&in_slice);
         apdu::Response::from_slice(in_slice)
             .ok_or(CommunicationError::ShortResponse)
     }
