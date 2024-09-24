@@ -46,7 +46,7 @@ impl SmartCard for AppendixDCard {
         } else if self.state >= 2
                 && request.header.to_be_u32() == 0x0C_A4_02_0C
                 && request.data.request_data() == Some(&Self::EXPECTED_SELECT_PAYLOAD)
-                && request.data.response_data_length() == Some(0x00) {
+                && request.data.response_data_length() == Some(0x100) {
             self.state = 3;
             Ok(Response {
                 data: Self::SELECT_RESPONSE.to_vec(),
@@ -55,7 +55,7 @@ impl SmartCard for AppendixDCard {
         } else if self.state >= 3
                 && request.header.to_be_u32() == 0x0C_B0_00_00
                 && request.data.request_data() == Some(&Self::EXPECTED_READ_4_PAYLOAD)
-                && request.data.response_data_length() == Some(0x00) {
+                && request.data.response_data_length() == Some(0x100) {
             Ok(Response {
                 data: Self::READ_4_RESPONSE.to_vec(),
                 trailer: ResponseTrailer::new(0x90, 0x00),
@@ -63,7 +63,7 @@ impl SmartCard for AppendixDCard {
         } else if self.state >= 3
                 && request.header.to_be_u32() == 0x0C_B0_00_04
                 && request.data.request_data() == Some(&Self::EXPECTED_READ_REST_PAYLOAD)
-                && request.data.response_data_length() == Some(0x00) {
+                && request.data.response_data_length() == Some(0x100) {
             Ok(Response {
                 data: Self::READ_REST_RESPONSE.to_vec(),
                 trailer: ResponseTrailer::new(0x90, 0x00),

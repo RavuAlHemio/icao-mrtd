@@ -2,10 +2,12 @@
 
 
 pub mod asn1;
+mod crypt;
 
 
 use std::fmt;
 
+use cipher::BlockModeDecrypt;
 use rasn::types::{Any, ObjectIdentifier, Oid, SetOf};
 
 use crate::der_util;
@@ -71,6 +73,8 @@ pub enum Operation {
 
 #[derive(Debug)]
 pub enum Error {
+    NotSupported,
+    MappingNotSupported { protocol: ObjectIdentifier },
     CardAccessDecoding(rasn::error::DecodeError),
     CardAccessEntryDecoding {
         entry_index: usize,
@@ -84,10 +88,15 @@ pub enum Error {
         operation: Operation,
         response: Response,
     },
+    CustomParameters,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self {
+            Self::NotSupported
+                => write!(f, "PACE is not supported"),
+            Self::MappingNotSupported { protocol }
+                => write!(f, "the mapping of protocol {} is currently not supported", protocol),
             Self::CardAccessDecoding(e)
                 => write!(f, "failed to decode EF.CardAccess: {}", e),
             Self::CardAccessEntryDecoding { entry_index, error }
@@ -96,16 +105,21 @@ impl fmt::Display for Error {
                 => write!(f, "failed to decode EF.CardAccess entry {} as PaceInfo: {}", entry_index, error),
             Self::OperationFailed { operation, response }
                 => write!(f, "operation {:?} failed with response code 0x{:04X}", operation, response.trailer.to_word()),
+            Self::CustomParameters
+                => write!(f, "custom parameters are not currently supported"),
         }
     }
 }
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::NotSupported => None,
+            Self::MappingNotSupported { .. } => None,
             Self::CardAccessDecoding(_) => None,
             Self::CardAccessEntryDecoding { .. } => None,
             Self::CardAccessEntryDecodingPace { .. } => None,
             Self::OperationFailed { .. } => None,
+            Self::CustomParameters => None,
         }
     }
 }
@@ -157,7 +171,7 @@ pub fn set_authentication_template<SC: SmartCard>(card: &mut SC, mechanism: &Oid
 }
 
 
-pub fn obtain_nonce<SC: SmartCard>(card: &mut SC) -> Result<Vec<u8>, CommunicationError> {
+pub fn obtain_encrypted_nonce<SC: SmartCard>(card: &mut SC) -> Result<Vec<u8>, CommunicationError> {
     let request_data = vec![
         0x7C, // dynamic authentication data
         0x00, // no data
@@ -197,6 +211,8 @@ pub fn establish(card: &pcsc::Card, card_access: &[u8]) -> Result<(), Error> {
         .map_err(|e| Error::CardAccessDecoding(e))?;
 
     // now try to decode each of its entries as a SEQUENCE OF Any (Vec<Any>)
+    let mut pace_info_opt = None;
+    let mut unsupported_mapping = None;
     for (entry_index, security_info) in security_infos.to_vec().into_iter().enumerate() {
         let security_info_seq: Vec<Any> = rasn::der::decode(security_info.as_bytes())
             .map_err(|error| Error::CardAccessEntryDecoding { entry_index, error })?;
@@ -214,11 +230,63 @@ pub fn establish(card: &pcsc::Card, card_access: &[u8]) -> Result<(), Error> {
             // not relevant
             continue;
         }
+        if security_info_oid == PACE_DH_IM_3DES_CBC_CBC
+                || security_info_oid == PACE_DH_IM_AES_CBC_CMAC_128
+                || security_info_oid == PACE_DH_IM_AES_CBC_CMAC_192
+                || security_info_oid == PACE_DH_IM_AES_CBC_CMAC_256
+                || security_info_oid == PACE_ECDH_IM_3DES_CBC_CBC
+                || security_info_oid == PACE_ECDH_IM_AES_CBC_CMAC_128
+                || security_info_oid == PACE_ECDH_IM_AES_CBC_CMAC_192
+                || security_info_oid == PACE_ECDH_IM_AES_CBC_CMAC_256
+                || security_info_oid == PACE_ECDH_CAM_AES_CBC_CMAC_128
+                || security_info_oid == PACE_ECDH_CAM_AES_CBC_CMAC_192
+                || security_info_oid == PACE_ECDH_CAM_AES_CBC_CMAC_256 {
+            unsupported_mapping = Some(security_info_oid.clone());
+            continue;
+        }
 
         // try to decode the whole thing as a PaceInfo now
         let pace_info: PaceInfo = rasn::der::decode(security_info.as_bytes())
             .map_err(|error| Error::CardAccessEntryDecodingPace { entry_index, error })?;
-        println!("{:#?}", pace_info);
+        pace_info_opt = Some(pace_info);
+        break;
     }
+
+    let pace_info = match pace_info_opt {
+        Some(pi) => pi,
+        None => {
+            return Err(
+                match unsupported_mapping {
+                    Some(protocol) => Error::MappingNotSupported { protocol },
+                    None => Error::NotSupported,
+                }
+            );
+        },
+    };
+
+    // we currently only support standard parameters (Doc 9303 Part 11 § 9.5.1)
+    let pace_parameter_id = pace_info.parameter_id
+        .ok_or(Error::CustomParameters)?;
+
+    if pace_info.protocol == PACE_DH_GM_3DES_CBC_CBC {
+        // regular Diffie-Hellman, 3DES-CBC for encryption, CBC-MAC for verification
+    } else if pace_info.protocol == PACE_DH_GM_AES_CBC_CMAC_128 {
+        // regular Diffie-Hellman, AES128-CBC for encryption, CMAC for verification
+    } else if pace_info.protocol == PACE_DH_GM_AES_CBC_CMAC_192 {
+        // regular Diffie-Hellman, AES192-CBC for encryption, CMAC for verification
+    } else if pace_info.protocol == PACE_DH_GM_AES_CBC_CMAC_256 {
+        // regular Diffie-Hellman, AES256-CBC for encryption, CMAC for verification
+    } else if pace_info.protocol == PACE_ECDH_GM_3DES_CBC_CBC {
+        // elliptic-curve Diffie-Hellman, 3DES-CBC for encryption, CBC-MAC for verification
+    } else if pace_info.protocol == PACE_ECDH_GM_AES_CBC_CMAC_128 {
+        // elliptic-curve Diffie-Hellman, AES128-CBC for encryption, CMAC for verification
+    } else if pace_info.protocol == PACE_ECDH_GM_AES_CBC_CMAC_192 {
+        // elliptic-curve Diffie-Hellman, AES192-CBC for encryption, CMAC for verification
+    } else if pace_info.protocol == PACE_ECDH_GM_AES_CBC_CMAC_256 {
+        // elliptic-curve Diffie-Hellman, AES256-CBC for encryption, CMAC for verification
+    } else {
+        unreachable!()
+    }
+
     todo!();
 }
