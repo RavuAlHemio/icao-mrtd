@@ -133,9 +133,13 @@ impl Data {
             Self::NoData => None,
             Self::RequestDataShort { .. } => None,
             Self::RequestDataExtended { .. } => None,
+            Self::ResponseDataShort { response_data_length: 0 } => Some(0x100),
             Self::ResponseDataShort { response_data_length } => Some((*response_data_length).try_into().unwrap()),
+            Self::ResponseDataExtended { response_data_length: 0 } => Some(0x1_0000),
             Self::ResponseDataExtended { response_data_length } => Some((*response_data_length).try_into().unwrap()),
+            Self::BothDataShort { response_data_length: 0, .. } => Some(0x100),
             Self::BothDataShort { response_data_length, .. } => Some((*response_data_length).try_into().unwrap()),
+            Self::BothDataExtended { response_data_length: 0, .. } => Some(0x1_0000),
             Self::BothDataExtended { response_data_length, .. } => Some((*response_data_length).try_into().unwrap()),
         }
     }

@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::iso7816::apdu;
+use crate::pace;
 use crate::secure_messaging;
 
 
@@ -10,6 +11,7 @@ pub enum CommunicationError {
     Pcsc(pcsc::Error),
     ShortResponse,
     SecureMessaging(secure_messaging::Error),
+    Pace(pace::Error),
 }
 impl fmt::Display for CommunicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -18,6 +20,7 @@ impl fmt::Display for CommunicationError {
             Self::Pcsc(e) => write!(f, "PCSC error: {}", e),
             Self::ShortResponse => write!(f, "response too short"),
             Self::SecureMessaging(e) => write!(f, "Secure Messaging error: {}", e),
+            Self::Pace(e) => write!(f, "PACE error: {}", e),
         }
     }
 }
@@ -28,6 +31,7 @@ impl std::error::Error for CommunicationError {
             Self::Pcsc(e) => Some(e),
             Self::ShortResponse => None,
             Self::SecureMessaging(e) => Some(e),
+            Self::Pace(e) => Some(e),
         }
     }
 }
@@ -39,6 +43,9 @@ impl From<pcsc::Error> for CommunicationError {
 }
 impl From<secure_messaging::Error> for CommunicationError {
     fn from(value: secure_messaging::Error) -> Self { Self::SecureMessaging(value) }
+}
+impl From<pace::Error> for CommunicationError {
+    fn from(value: pace::Error) -> Self { Self::Pace(value) }
 }
 
 

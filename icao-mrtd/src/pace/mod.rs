@@ -8,6 +8,9 @@ use std::fmt;
 
 use rasn::types::{Any, ObjectIdentifier, Oid, SetOf};
 
+use crate::der_util;
+use crate::iso7816::apdu::{Apdu, CommandHeader, Data, Response};
+use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::pace::asn1::PaceInfo;
 
 
@@ -59,6 +62,13 @@ pub const PACE_PROTOCOL_OIDS: [&'static Oid; 19] = [
 ];
 
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Operation {
+    SetAuthenticationTemplate,
+    ObtainNonce,
+}
+
+
 #[derive(Debug)]
 pub enum Error {
     CardAccessDecoding(rasn::error::DecodeError),
@@ -70,6 +80,10 @@ pub enum Error {
         entry_index: usize,
         error: rasn::error::DecodeError,
     },
+    OperationFailed {
+        operation: Operation,
+        response: Response,
+    },
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -80,6 +94,8 @@ impl fmt::Display for Error {
                 => write!(f, "failed to decode EF.CardAccess entry {}: {}", entry_index, error),
             Self::CardAccessEntryDecodingPace { entry_index, error }
                 => write!(f, "failed to decode EF.CardAccess entry {} as PaceInfo: {}", entry_index, error),
+            Self::OperationFailed { operation, response }
+                => write!(f, "operation {:?} failed with response code 0x{:04X}", operation, response.trailer.to_word()),
         }
     }
 }
@@ -89,7 +105,85 @@ impl std::error::Error for Error {
             Self::CardAccessDecoding(_) => None,
             Self::CardAccessEntryDecoding { .. } => None,
             Self::CardAccessEntryDecodingPace { .. } => None,
+            Self::OperationFailed { .. } => None,
         }
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PasswordSource {
+    Mrz,
+    Can,
+}
+
+
+pub fn set_authentication_template<SC: SmartCard>(card: &mut SC, mechanism: &Oid, password_source: PasswordSource) -> Result<(), CommunicationError> {
+    let mut request_data = Vec::new();
+
+    // encode mechanism (0x80)
+    let mechanism_bytes = der_util::oid_to_der_bytes(mechanism);
+    request_data.push(0x80);
+    der_util::encode_primitive_length(&mut request_data, mechanism_bytes.len());
+    request_data.extend(&mechanism_bytes);
+
+    // encode password source (0x83)
+    request_data.push(0x83);
+    request_data.push(0x01);
+    match password_source {
+        PasswordSource::Mrz => request_data.push(0x01),
+        PasswordSource::Can => request_data.push(0x02),
+    }
+
+    // do it
+    let request = Apdu {
+        header: CommandHeader {
+            cla: 0x00,
+            ins: 0x22, // MANAGE SECURITY ENVIRONMENT
+            p1: 0b1100_0001, // verify/encrypt/extauth, compute/decrypt/intauth, set
+            p2: 0xA4, // control reference template for authentication
+        },
+        data: Data::RequestDataShort { request_data },
+    };
+    let response = card.communicate(&request)?;
+    if response.trailer.to_word() == 0x9000 {
+        Ok(())
+    } else {
+        Err(Error::OperationFailed {
+            operation: Operation::SetAuthenticationTemplate,
+            response,
+        }.into())
+    }
+}
+
+
+pub fn obtain_nonce<SC: SmartCard>(card: &mut SC) -> Result<Vec<u8>, CommunicationError> {
+    let request_data = vec![
+        0x7C, // dynamic authentication data
+        0x00, // no data
+    ];
+
+    // do it
+    let request = Apdu {
+        header: CommandHeader {
+            cla: 0b000_1_00_00, // not the last in a chain, no secure messaging, logical channel 0
+            ins: 0x86, // GENERAL AUTHENTICATE
+            p1: 0x00, // algorithm is known (from "set authentication template")
+            p2: 0x00, // key index is known (from "set authentication template")
+        },
+        data: Data::BothDataShort {
+            request_data,
+            response_data_length: 0,
+        },
+    };
+    let response = card.communicate(&request)?;
+    if response.trailer.to_word() == 0x9000 {
+        Ok(response.data)
+    } else {
+        Err(Error::OperationFailed {
+            operation: Operation::ObtainNonce,
+            response,
+        }.into())
     }
 }
 

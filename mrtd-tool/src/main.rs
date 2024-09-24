@@ -68,36 +68,30 @@ fn main() {
     println!("  optional 1:   {:?}", mrz.is_optional_data_1_valid());
     println!("  composite:    {}", mrz.is_composite_valid());
 
-    /*
     // try reading EF.CardAccess
-    let select_card_access = iso7816::apdu::Apdu {
-        header: iso7816::apdu::CommandHeader {
+    let select_card_access = icao_mrtd::iso7816::apdu::Apdu {
+        header: icao_mrtd::iso7816::apdu::CommandHeader {
             cla: 0x00,
             ins: 0xA4, // SELECT
             p1: 0b000_010_00, // select from MF
             p2: 0b0000_00_00, // return basic metadata, return first or only occurrence
         },
-        data: iso7816::apdu::Data::BothDataShort {
+        data: icao_mrtd::iso7816::apdu::Data::BothDataShort {
             request_data: vec![0x01, 0x1C],
             response_data_length: 255,
         },
     };
 
     let mut authenticated = false;
-    match crate::iso7816::file::read_file(&card, &select_card_access) {
+    match icao_mrtd::iso7816::file::read_file(&mut card, &select_card_access) {
         Ok(card_access) => {
-            crate::pace::establish(&card, &card_access)
-                .expect("failed to establish PACE");
-            authenticated = true;
-        },
-        Err(crate::iso7816::file::ReadError::FileNotFound) => {
-            // fall through to Basic Access Control
+            println!("EF.CardAccess:");
+            icao_mrtd::hexdump(&card_access);
         },
         Err(e) => {
             panic!("failed to read EF.CardAccess: {}", e);
         },
     };
-    */
 
     // select eMRTD Application
     let select_emrtd_app = icao_mrtd::iso7816::apdu::Apdu {
@@ -151,10 +145,11 @@ fn main() {
             cla: 0x00,
             ins: 0xA4, // SELECT
             p1: 0b000_000_10, // select EF under current DF
-            p2: 0b0000_11_00, // return no metadata, return first or only occurrence
+            p2: 0b0000_00_00, // return basic metadata, return first or only occurrence
         },
-        data: icao_mrtd::iso7816::apdu::Data::RequestDataShort {
+        data: icao_mrtd::iso7816::apdu::Data::BothDataShort {
             request_data: vec![0x01, 0x1E],
+            response_data_length: 0,
         },
     };
     match icao_mrtd::iso7816::file::read_file(&mut bac, &select_com) {

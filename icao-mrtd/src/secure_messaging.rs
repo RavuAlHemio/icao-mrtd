@@ -233,7 +233,7 @@ pub trait SecureMessaging<SC: SmartCard> {
             // 0x87 = 0b10_0_00111 (Context-Specific, Primitive, 7)
             let mut data_object_87 = Vec::with_capacity(1 + 1 + 1 + padded_data.len());
             data_object_87.push(0x87);
-            der_encode_primitive_length(&mut data_object_87, 1 + padded_data.len());
+            crate::der_util::encode_primitive_length(&mut data_object_87, 1 + padded_data.len());
             data_object_87.push(0x01); // ISO 7816 padding
             data_object_87.extend(padded_data);
 
@@ -271,7 +271,7 @@ pub trait SecureMessaging<SC: SmartCard> {
         // build data object 8E
         let mut data_object_8e = Vec::with_capacity(1 + 1 + 8);
         data_object_8e.push(0x8E);
-        der_encode_primitive_length(&mut data_object_8e, mac.len());
+        crate::der_util::encode_primitive_length(&mut data_object_8e, mac.len());
         data_object_8e.extend(&mac);
 
         // append 8E (MAC) to body
@@ -304,7 +304,7 @@ pub trait SecureMessaging<SC: SmartCard> {
                 return Err(Error::ResponseTlvFormat.into());
             }
 
-            let (data_length, rest_slice) = der_try_decode_primitive_length(&response_slice[1..])
+            let (data_length, rest_slice) = crate::der_util::try_decode_primitive_length(&response_slice[1..])
                 .ok_or(Error::ResponseTlvFormat)?;
             let tag_and_length = &response_slice[0..response_slice.len()-rest_slice.len()];
             response_slice = rest_slice;
@@ -453,10 +453,6 @@ impl<'sc, SC: SmartCard> SecureMessaging<SC> for Sm3Des<'sc, SC> {
 
     fn get_smart_card_mut(&mut self) -> &mut SC { &mut self.card }
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8] { &mut self.send_sequence_counter }
-
-    fn increment_send_sequence_counter(&mut self) -> &[u8] {
-        todo!();
-    }
 
     fn decrypt_padded_data(&self, data: &mut [u8]) {
         let iv = [0u8; 8];
@@ -698,61 +694,5 @@ impl<'sc, SC: SmartCard> SecureMessaging<SC> for SmAes256<'sc, SC> {
 impl<'sc, SC: SmartCard> SmartCard for SmAes256<'sc, SC> {
     fn communicate(&mut self, request: &Apdu) -> Result<Response, CommunicationError> {
         SecureMessaging::communicate(self, request)
-    }
-}
-
-
-/// Encode an ASN.1 DER primitive value length.
-pub fn der_encode_primitive_length(output: &mut Vec<u8>, length: usize) {
-    if length < 128 {
-        // single-byte encoding
-        output.push(length.try_into().unwrap());
-    } else {
-        // 0b1nnn_nnnn and then n additional bytes that actually specify the length
-        // (big-endian)
-        let length_bytes = length.to_be_bytes();
-        let mut trimmed_length_slice = &length_bytes[..];
-        while trimmed_length_slice[0] == 0x00 {
-            trimmed_length_slice = &trimmed_length_slice[1..];
-        }
-        output.push(0b1000_0000 | u8::try_from(trimmed_length_slice.len()).unwrap());
-        output.extend(trimmed_length_slice);
-    }
-}
-
-
-/// Decode an ASN.1 DER primitive value length.
-///
-/// The length must be at the beginning of the input slice.
-///
-/// Returns a tuple `(length, rest)` where `rest` is the rest of the input slice once the length has
-/// been removed.
-pub fn der_try_decode_primitive_length(input: &[u8]) -> Option<(usize, &[u8])> {
-    if input.len() == 0 {
-        return None;
-    }
-    let start_byte = input[0];
-    let start_lower_bits = start_byte & 0b0111_1111;
-    if start_byte & 0b1000_0000 != 0 {
-        // multiple bytes
-        let length_byte_count: usize = start_lower_bits.into();
-        if length_byte_count == 0 {
-            return None;
-        }
-        if length_byte_count > input.len() - 1 {
-            // that will never fit
-            return None;
-        }
-        let mut length: usize = 0;
-        for length_byte in &input[1..1+length_byte_count] {
-            let Some(multiplied) = length.checked_mul(256) else { return None };
-            length = multiplied;
-            let Some(added) = length.checked_add(usize::from(*length_byte)) else { return None };
-            length = added;
-        }
-        Some((length, &input[1+length_byte_count..]))
-    } else {
-        let length = start_lower_bits.into();
-        Some((length, &input[1..]))
     }
 }
