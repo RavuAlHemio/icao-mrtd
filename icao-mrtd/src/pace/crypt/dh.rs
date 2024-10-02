@@ -1,42 +1,47 @@
 //! The Diffie-Hellman secret exchange process.
 
 
-use num_bigint::BigUint;
+use crypto_bigint::BoxedUint;
+use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
 use rand::RngCore;
 use rand::rngs::OsRng;
+use zeroize_derive::ZeroizeOnDrop;
 
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct DiffieHellman {
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
+pub(crate) struct DiffieHellman {
     /// The prime or modulus.
-    prime: BigUint,
+    prime: BoxedUint,
 
     /// The generator or base.
-    generator: BigUint,
+    generator: BoxedUint,
 
     /// The private key.
-    private_key: BigUint,
+    private_key: BoxedUint,
 }
 impl DiffieHellman {
     /// Returns a reference to the prime or modulus.
-    pub fn prime(&self) -> &BigUint { &self.prime }
+    pub fn prime(&self) -> &BoxedUint { &self.prime }
 
     /// Returns a reference to the generator or base.
-    pub fn generator(&self) -> &BigUint { &self.prime }
+    pub fn generator(&self) -> &BoxedUint { &self.generator }
 
     /// Creates a new Diffie-Hellman structure with the given prime and generator as well as a
     /// randomly generated private key that has the length matching the given subgroup size.
-    pub fn new(prime: BigUint, generator: BigUint, subgroup_size_bytes: usize) -> Self {
+    pub fn new(prime: BoxedUint, generator: BoxedUint, subgroup_size_bytes: usize) -> Self {
         // generate a private key
         let mut private_key_bytes = vec![0u8; subgroup_size_bytes];
         OsRng.fill_bytes(private_key_bytes.as_mut_slice());
-        let private_key = BigUint::from_bytes_be(private_key_bytes.as_slice());
+        let private_key = BoxedUint::from_be_slice(
+            private_key_bytes.as_slice(),
+            (8 * subgroup_size_bytes).try_into().unwrap(),
+        ).unwrap();
 
         Self::new_with_private_key(prime, generator, private_key)
     }
 
     /// Creates a new Diffie-Hellman structure with the given prime, generator and private key.
-    pub fn new_with_private_key(prime: BigUint, generator: BigUint, private_key: BigUint) -> Self {
+    pub fn new_with_private_key(prime: BoxedUint, generator: BoxedUint, private_key: BoxedUint) -> Self {
         Self {
             prime,
             generator,
@@ -45,16 +50,20 @@ impl DiffieHellman {
     }
 
     /// Generates the public key for this Diffie-Hellman structure.
-    pub fn public_key(&self) -> BigUint {
+    pub fn public_key(&self) -> BoxedUint {
         // pubkey = generator ** private_key mod prime
-        self.generator.modpow(&self.private_key, &self.prime)
+        let monty_params = BoxedMontyParams::new(self.prime.to_odd().unwrap());
+        let monty_generator = BoxedMontyForm::new(self.generator.clone(), monty_params);
+        monty_generator.pow(&self.private_key).retrieve()
     }
 
     /// Derives the secret for this Diffie-Hellman structure given the public key of the other
     /// party.
-    pub fn finalize(&self, other_public_key: &BigUint) -> BigUint {
-        // secret = other_public_key ** secret_key mod prime
-        other_public_key.modpow(&self.private_key, &self.prime)
+    pub fn finalize(&self, other_public_key: &BoxedUint) -> BoxedUint {
+        // secret = other_public_key ** private_key mod prime
+        let monty_params = BoxedMontyParams::new(self.prime.to_odd().unwrap());
+        let monty_other_public = BoxedMontyForm::new(other_public_key.clone(), monty_params);
+        monty_other_public.pow(&self.private_key).retrieve()
     }
 }
 
@@ -62,35 +71,41 @@ impl DiffieHellman {
 #[cfg(test)]
 mod tests {
     use super::DiffieHellman;
+    use crypto_bigint::BoxedUint;
     use hex_literal::hex;
-    use num_bigint::BigUint;
 
     #[test]
     fn wikipedia_example() {
-        let prime = BigUint::from(23u8);
-        let generator = BigUint::from(5u8);
+        let prime = BoxedUint::from(23u8);
+        let generator = BoxedUint::from(5u8);
 
-        let alice_private = BigUint::from(4u8);
-        let bob_private = BigUint::from(3u8);
+        let alice_private = BoxedUint::from(4u8);
+        let bob_private = BoxedUint::from(3u8);
 
         let alice_dh = DiffieHellman::new_with_private_key(prime.clone(), generator.clone(), alice_private);
         let bob_dh = DiffieHellman::new_with_private_key(prime.clone(), generator.clone(), bob_private);
 
         let alice_public = alice_dh.public_key();
-        assert_eq!(alice_public, BigUint::from(4u8));
+        assert_eq!(alice_public, BoxedUint::from(4u8));
         let bob_public = bob_dh.public_key();
-        assert_eq!(bob_public, BigUint::from(10u8));
+        assert_eq!(bob_public, BoxedUint::from(10u8));
 
         let alice_secret = alice_dh.finalize(&bob_public);
         let bob_secret = bob_dh.finalize(&alice_public);
         assert_eq!(alice_secret, bob_secret);
-        assert_eq!(alice_secret, BigUint::from(18u8));
-        assert_eq!(bob_secret, BigUint::from(18u8));
+        assert_eq!(alice_secret, BoxedUint::from(18u8));
+        assert_eq!(bob_secret, BoxedUint::from(18u8));
+    }
+
+    fn boxed_uint_from_be_slice(slice: &[u8]) -> BoxedUint {
+        let bits: u32 = (8 * slice.len()).try_into().unwrap();
+        BoxedUint::from_be_slice(slice, bits).unwrap()
     }
 
     #[test]
     fn icao_doc9303_part11_secg2_example() {
-        let prime = BigUint::from_bytes_be(&hex!("
+        // classic Diffie-Hellman
+        let prime = boxed_uint_from_be_slice(&hex!("
             B10B8F96 A080E01D DE92DE5E AE5D54EC
             52C99FBC FB06A3C6 9A6A9DCA 52D23B61
             6073E286 75A23D18 9838EF1E 2EE652C0
@@ -100,7 +115,7 @@ mod tests {
             A151AF5F 0DC8B4BD 45BF37DF 365C1A65
             E68CFDA7 6D4DA708 DF1FB2BC 2E4A4371
         "));
-        let generator = BigUint::from_bytes_be(&hex!("
+        let generator = boxed_uint_from_be_slice(&hex!("
             A4D1CBD5 C3FD3412 6765A442 EFB99905
             F8104DD2 58AC507F D6406CFF 14266D31
             266FEA1E 5C41564B 777E690F 5504F213
@@ -111,10 +126,10 @@ mod tests {
             858F4DCE F97C2A24 855E6EEB 22B3B2E5
         "));
 
-        let terminal_private = BigUint::from_bytes_be(&hex!("
+        let terminal_private = boxed_uint_from_be_slice(&hex!("
             5265030F 751F4AD1 8B08AC56 5FC7AC95 2E41618D
         "));
-        let chip_private = BigUint::from_bytes_be(&hex!("
+        let chip_private = boxed_uint_from_be_slice(&hex!("
             66DDAFEA C1609CB5 B963BB0C B3FF8B3E 047F336C
         "));
 
@@ -124,7 +139,7 @@ mod tests {
         let terminal_public = terminal_dh.public_key();
         assert_eq!(
             terminal_public,
-            BigUint::from_bytes_be(&hex!("
+            boxed_uint_from_be_slice(&hex!("
                 23FB3749 EA030D2A 25B278D2 A562047A
                 DE3F01B7 4F17A154 02CB7352 CA7D2B3E
                 B71C343D B13D1DEB CE9A3666 DBCFC920
@@ -138,7 +153,7 @@ mod tests {
         let chip_public = chip_dh.public_key();
         assert_eq!(
             chip_public,
-            BigUint::from_bytes_be(&hex!("
+            boxed_uint_from_be_slice(&hex!("
                 78879F57 225AA808 0D52ED0F C890A4B2
                 5336F699 AA89A2D3 A189654A F70729E6
                 23EA5738 B26381E4 DA19E004 706FACE7
@@ -152,7 +167,7 @@ mod tests {
 
         let terminal_secret = terminal_dh.finalize(&chip_public);
         let chip_secret = chip_dh.finalize(&terminal_public);
-        let shared_secret = BigUint::from_bytes_be(&hex!("
+        let shared_secret = boxed_uint_from_be_slice(&hex!("
             5BABEBEF 5B74E5BA 94B5C063 FDA15F1F
             1CDE9487 3EE0A5D3 A2FCAB49 F258D07F
             544F13CB 66658C3A FEE9E727 389BE3F6
