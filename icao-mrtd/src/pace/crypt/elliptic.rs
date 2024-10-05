@@ -1,256 +1,44 @@
-use std::{ops::{Add, Div, Mul, Sub}, sync::LazyLock};
+use std::ops::{Add, Mul};
 
-use crypto_bigint::{modular::{BoxedMontyForm, BoxedMontyParams}, BitOps, BoxedUint, Integer, NonZero};
+use crypto_bigint::{BoxedUint, Integer};
+use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 use zeroize_derive::ZeroizeOnDrop;
 
 
-static ONE: LazyLock<BoxedUint> = LazyLock::new(|| BoxedUint::one());
-static TWO: LazyLock<BoxedUint> = LazyLock::new(|| &*ONE + &*ONE);
-static THREE: LazyLock<BoxedUint> = LazyLock::new(|| &*TWO + &BoxedUint::one());
-static FOUR: LazyLock<BoxedUint> = LazyLock::new(|| &*TWO + &*TWO);
-static EIGHT: LazyLock<BoxedUint> = LazyLock::new(|| &*FOUR + &*FOUR);
-
-
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct BoxedInt {
-    pub negative: bool,
-    pub magnitude: BoxedUint,
-}
-impl BoxedInt {
-    pub fn add(&self, rhs: &Self) -> Self {
-        match (self.negative, rhs.negative) {
-            (false, false)|(true, true) => {
-                // just add them up, taking the common sign
-                // for the negative case, (-a) + (-b) == -(a + b)
-                Self {
-                    negative: self.negative,
-                    magnitude: (&self.magnitude) + (&rhs.magnitude),
-                }
-            },
-            (false, true) => {
-                // self >= 0, rhs < 0
-                if self.magnitude >= rhs.magnitude {
-                    // positive result or zero
-                    Self {
-                        negative: false,
-                        magnitude: (&self.magnitude) - (&rhs.magnitude),
-                    }
-                } else {
-                    // negative result; swap operands in subtraction
-                    Self {
-                        negative: true,
-                        magnitude: (&rhs.magnitude) - (&self.magnitude),
-                    }
-                }
-            },
-            (true, false) => {
-                // run the gauntlet with swapped operands
-                rhs.add(self)
-            },
-        }
-    }
-
-    pub fn sub(&self, rhs: &Self) -> Self {
-        // a - b == a + (-b)
-        self.add(&Self {
-            negative: !rhs.negative,
-            magnitude: rhs.magnitude.clone(),
-        })
-    }
-
-    pub fn mul(&self, rhs: &Self) -> Self {
-        Self {
-            negative: self.negative ^ rhs.negative,
-            magnitude: (&self.magnitude) * (&rhs.magnitude),
-        }
-    }
-
-    pub fn div(&self, rhs: &Self) -> Self {
-        Self {
-            negative: self.negative ^ rhs.negative,
-            magnitude: (&self.magnitude) / NonZero::new(rhs.magnitude.clone()).unwrap(),
-        }
-    }
-
-    pub fn is_greater_than(&self, rhs: &Self) -> bool {
-        match (self.negative, rhs.negative) {
-            (false, false) => self.magnitude > rhs.magnitude,
-            (true, false) => false,
-            (false, true) => true,
-            (true, true) => self.magnitude < rhs.magnitude,
-        }
-    }
-
-    pub fn zero() -> Self {
-        Self {
-            negative: false,
-            magnitude: BoxedUint::zero(),
-        }
-    }
-
-    pub fn one() -> Self {
-        Self {
-            negative: false,
-            magnitude: BoxedUint::one(),
-        }
-    }
-
-    pub fn is_zero(&self) -> bool {
-        self.magnitude.is_zero().into()
-    }
-}
-impl From<&BoxedUint> for BoxedInt {
-    fn from(value: &BoxedUint) -> Self {
-        Self {
-            negative: false,
-            magnitude: value.clone(),
-        }
-    }
-}
-
-
-fn modulo_inverse(number: &BoxedUint, modulus: &BoxedUint) -> Option<BoxedUint> {
-    // extended Euclidean algorithm
-    let mut t = BoxedInt::zero();
-    let mut newt = BoxedInt::one();
-    let mut r: BoxedInt = modulus.into();
-    let mut newr: BoxedInt = number.into();
-
-    while !newr.is_zero() {
-        let quotient = r.div(&newr);
-
-        let newert = t.sub(&quotient.mul(&newt));
-        (t, newt) = (newt, newert);
-
-        let newerr = r.sub(&quotient.mul(&newr));
-        (r, newr) = (newr, newerr);
-    }
-
-    if r.is_greater_than(&BoxedInt::one()) {
-        // not invertible
-        None
-    } else {
-        if BoxedInt::zero().is_greater_than(&t) {
-            t = t.add(&modulus.into());
-        }
-        Some(t.magnitude)
-    }
-}
-
-
+/// A point in affine coordinates.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub struct AffinePoint {
-    pub x: BoxedUint,
-    pub y: BoxedUint,
+    x: BoxedUint,
+    y: BoxedUint,
 }
 impl AffinePoint {
     pub const fn new(x: BoxedUint, y: BoxedUint) -> Self {
-        Self {
-            x,
-            y,
-        }
-    }
-
-    pub fn into_projective(self) -> ConcreteProjectivePoint {
-        ConcreteProjectivePoint::new(
-            self.x.clone(),
-            self.y.clone(),
-            BoxedUint::one(),
-        )
+        Self { x, y }
     }
 }
 
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
-pub enum ProjectivePoint {
-    Concrete(ConcreteProjectivePoint),
-    AtInfinity,
-}
-impl ProjectivePoint {
-    pub fn as_concrete(&self) -> Option<&ConcreteProjectivePoint> {
-        match self {
-            Self::Concrete(c) => Some(c),
-            _ => None,
-        }
-    }
-}
-impl From<ConcreteProjectivePoint> for ProjectivePoint {
-    fn from(value: ConcreteProjectivePoint) -> Self { Self::Concrete(value) }
-}
-
-
+/// A point in projective coordinates in Montgomery form.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum MontyProjectivePoint {
-    Concrete { x: BoxedMontyForm, y: BoxedMontyForm, z: BoxedMontyForm },
-    AtInfinity,
+struct MontyProjectivePoint {
+    x: BoxedMontyForm,
+    y: BoxedMontyForm,
+    z: BoxedMontyForm,
 }
 impl MontyProjectivePoint {
-    pub fn take(point: &ProjectivePoint, params: BoxedMontyParams) -> Self {
-        match point {
-            ProjectivePoint::AtInfinity => Self::AtInfinity,
-            ProjectivePoint::Concrete(cpp) => Self::take_concrete(cpp, params),
-        }
-    }
-
-    pub fn take_concrete(point: &ConcreteProjectivePoint, params: BoxedMontyParams) -> Self {
-        Self::Concrete {
-            x: BoxedMontyForm::new(point.x.widen(params.bits_precision()), params.clone()),
-            y: BoxedMontyForm::new(point.y.widen(params.bits_precision()), params.clone()),
-            z: BoxedMontyForm::new(point.z.widen(params.bits_precision()), params.clone()),
-        }
-    }
-
-    pub fn retrieve(&self) -> ProjectivePoint {
-        match self {
-            Self::Concrete { x, y, z } => ProjectivePoint::Concrete(ConcreteProjectivePoint::new(
-                x.retrieve(), y.retrieve(), z.retrieve(),
-            )),
-            Self::AtInfinity => ProjectivePoint::AtInfinity,
-        }
-    }
-
-    pub fn as_concrete(&self) -> Option<(&BoxedMontyForm, &BoxedMontyForm, &BoxedMontyForm)> {
-        match self {
-            Self::Concrete { x, y, z } => Some((x, y, z)),
-            Self::AtInfinity => None,
-        }
+    pub fn new(x: BoxedMontyForm, y: BoxedMontyForm, z: BoxedMontyForm) -> Self {
+        assert_eq!(x.params(), y.params());
+        assert_eq!(x.params(), z.params());
+        Self { x, y, z }
     }
 }
 
-
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
-pub struct ConcreteProjectivePoint {
-    pub x: BoxedUint,
-    pub y: BoxedUint,
-    pub z: BoxedUint,
-}
-impl ConcreteProjectivePoint {
-    pub const fn new(x: BoxedUint, y: BoxedUint, z: BoxedUint) -> Self {
-        Self {
-            x,
-            y,
-            z,
-        }
-    }
-
-    pub fn into_affine(self, modulus: &BoxedUint) -> Option<AffinePoint> {
-        // invert Z
-        let z_inverted = modulo_inverse(&self.z, modulus)?;
-        let x = self.x.mul_mod(&z_inverted, modulus);
-        let y = self.y.mul_mod(&z_inverted, modulus);
-        Some(AffinePoint::new(x, y))
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 struct MontyKnowledge {
     params: BoxedMontyParams,
     a: BoxedMontyForm,
     b: BoxedMontyForm,
-    two: BoxedMontyForm,
-    three: BoxedMontyForm,
-    four: BoxedMontyForm,
-    eight: BoxedMontyForm,
 }
 
 /// An elliptic curve of the form `y**2 ≡ x**3 + ax + b` modulo a prime number.
@@ -287,7 +75,7 @@ impl PrimeWeierstrassCurve {
             coefficient_b,
             generator,
         };
-        if !curve.is_on_curve(&curve.generator) {
+        if !bool::from(curve.is_on_curve_affine(&curve.generator)) {
             panic!("generator is not on curve");
         }
         curve
@@ -298,52 +86,66 @@ impl PrimeWeierstrassCurve {
     pub fn coefficient_b(&self) -> &BoxedUint { &self.coefficient_b }
     pub fn generator(&self) -> &AffinePoint { &self.generator }
 
+    /// Returns important curve parameters for operations in Montgomery form.
     fn monty_knowledge(&self) -> MontyKnowledge {
         let monty_params = BoxedMontyParams::new(self.prime.to_odd().unwrap());
         MontyKnowledge {
             params: monty_params.clone(),
             a: BoxedMontyForm::new(self.coefficient_a.clone(), monty_params.clone()),
             b: BoxedMontyForm::new(self.coefficient_b.clone(), monty_params.clone()),
-            two: BoxedMontyForm::new(TWO.widen(monty_params.bits_precision()), monty_params.clone()),
-            three: BoxedMontyForm::new(THREE.widen(monty_params.bits_precision()), monty_params.clone()),
-            four: BoxedMontyForm::new(FOUR.widen(monty_params.bits_precision()), monty_params.clone()),
-            eight: BoxedMontyForm::new(EIGHT.widen(monty_params.bits_precision()), monty_params.clone()),
         }
     }
 
-    fn is_on_curve_internal(&self, monty: &MontyKnowledge, x_monty: &BoxedMontyForm, y_monty: &BoxedMontyForm) -> bool {
-        let y_squared = y_monty.mul(y_monty);
-        let x_cubed = x_monty.mul(x_monty).mul(x_monty);
-        let ax = (&x_monty).mul(&monty.a);
+    fn internal_is_on_curve(monty: &MontyKnowledge, point: &MontyProjectivePoint) -> Choice {
+        let inverse_option = point.z.invert();
+        let inverse_alternative = point.z.clone();
+        let inverse = inverse_option.clone().into_option().unwrap_or(inverse_alternative);
+
+        let x = (&point.x).mul(&inverse);
+        let y = (&point.y).mul(&inverse);
+
+        let y_squared = (&y).mul(&y);
+        let x_cubed = (&x).mul(&x).mul(&x);
+        let ax = (&x).mul(&monty.a);
         let rhs = (&x_cubed).add(&ax).add(&monty.b);
-        y_squared == rhs
+        let are_equal = y_squared.retrieve().ct_eq(&rhs.retrieve());
+        Choice::conditional_select(&Choice::from(0), &are_equal, inverse_option.is_some())
     }
 
-    pub fn is_on_curve(&self, point: &AffinePoint) -> bool {
-        let monty = self.monty_knowledge();
-
-        let x_monty = BoxedMontyForm::new(point.x.clone(), monty.params.clone());
-        let y_monty = BoxedMontyForm::new(point.y.clone(), monty.params.clone());
-
-        self.is_on_curve_internal(&monty, &x_monty, &y_monty)
+    fn internal_affine_to_monty_projective(monty: &MontyKnowledge, point: &AffinePoint) -> MontyProjectivePoint {
+        let x = BoxedMontyForm::new(point.x.clone(), monty.params.clone());
+        let y = BoxedMontyForm::new(point.y.clone(), monty.params.clone());
+        let z = BoxedMontyForm::one(monty.params.clone());
+        MontyProjectivePoint::new(x, y, z)
     }
 
-    fn double_point_internal(&self, monty: &MontyKnowledge, x: &BoxedMontyForm, y: &BoxedMontyForm, z: &BoxedMontyForm) -> MontyProjectivePoint {
+    fn internal_monty_projective_to_affine(point: &MontyProjectivePoint) -> CtOption<(BoxedMontyForm, BoxedMontyForm)> {
+        let inverse_option = point.z.invert();
+        let inverse_alternative = point.z.clone();
+        let inverse = inverse_option.clone().into_option().unwrap_or(inverse_alternative);
+
+        let x = (&point.x).mul(&inverse);
+        let y = (&point.y).mul(&inverse);
+
+        CtOption::new((x, y), inverse_option.is_some())
+    }
+
+    fn internal_double_point(monty: &MontyKnowledge, point: &MontyProjectivePoint) -> MontyProjectivePoint {
         // Renes/Costello/Batina 2015 (https://eprint.iacr.org/2015/1060), Algorithm 3
         let b3 = (&monty.b).add(&monty.b).add(&monty.b);
 
         // 1. t0 ← X · X
-        let mut t0 = x.mul(x);
+        let mut t0 = (&point.x).mul(&point.x);
         // 2. t1 ← Y · Y
-        let mut t1 = y.mul(y);
+        let t1 = (&point.y).mul(&point.y);
         // 3. t2 ← Z · Z
-        let mut t2 = z.mul(z);
+        let mut t2 = (&point.z).mul(&point.z);
         // 4. t3 ← X · Y
-        let mut t3 = x.mul(&y);
+        let mut t3 = (&point.x).mul(&point.y);
         // 5. t3 ← t3 + t3
         t3 = (&t3).add(&t3);
         // 6. Z3 ← X · Z
-        let mut z3 = x.mul(z);
+        let mut z3 = (&point.x).mul(&point.z);
         // 7. Z3 ← Z3 + Z3
         z3 = (&z3).add(&z3);
         // 8. X3 ← a · Z3
@@ -381,7 +183,7 @@ impl PrimeWeierstrassCurve {
         // 24. Y3 ← Y3 + t0
         y3 = (&y3).add(&t0);
         // 25. t2 ← Y · Z
-        t2 = y.mul(z);
+        t2 = (&point.y).mul(&point.z);
         // 26. t2 ← t2 + t2
         t2 = (&t2).add(&t2);
         // 27. t0 ← t2 · t3
@@ -394,36 +196,23 @@ impl PrimeWeierstrassCurve {
         z3 = (&z3).add(&z3);
         // 31. Z3 ← Z3 + Z3
         z3 = (&z3).add(&z3);
-        MontyProjectivePoint::Concrete { x: x3, y: y3, z: z3 }
+        MontyProjectivePoint { x: x3, y: y3, z: z3 }
     }
 
-    pub fn double_point(&self, point: &ConcreteProjectivePoint) -> ProjectivePoint {
-        if bool::from(point.y.is_zero()) {
-            return ProjectivePoint::AtInfinity;
-        }
-
-        let monty = self.monty_knowledge();
-        let x_monty = BoxedMontyForm::new(point.x.clone(), monty.params.clone());
-        let y_monty = BoxedMontyForm::new(point.y.clone(), monty.params.clone());
-        let z_monty = BoxedMontyForm::new(point.z.clone(), monty.params.clone());
-
-        self.double_point_internal(&monty, &x_monty, &y_monty, &z_monty).retrieve()
-    }
-
-    fn add_points_internal(&self, monty: &MontyKnowledge, x1: &BoxedMontyForm, y1: &BoxedMontyForm, z1: &BoxedMontyForm, x2: &BoxedMontyForm, y2: &BoxedMontyForm, z2: &BoxedMontyForm) -> MontyProjectivePoint {
+    fn internal_add_points(monty: &MontyKnowledge, lhs: &MontyProjectivePoint, rhs: &MontyProjectivePoint) -> MontyProjectivePoint {
         // Renes/Costello/Batina 2015 (https://eprint.iacr.org/2015/1060), Algorithm 1
         let b3 = (&monty.b).add(&monty.b).add(&monty.b);
 
         // 1. t0 ← X1 · X2
-        let mut t0 = x1.mul(x2);
+        let mut t0 = (&lhs.x).mul(&rhs.x);
         // 2. t1 ← Y1 · Y2
-        let mut t1 = y1.mul(y2);
+        let mut t1 = (&lhs.y).mul(&rhs.y);
         // 3. t2 ← Z1 · Z2
-        let mut t2 = z1.mul(z2);
+        let mut t2 = (&lhs.z).mul(&rhs.z);
         // 4. t3 ← X1 + Y1
-        let mut t3 = x1.add(y1);
+        let mut t3 = (&lhs.x).add(&lhs.y);
         // 5. t4 ← X2 + Y2
-        let mut t4 = x2.add(y2);
+        let mut t4 = (&rhs.x).add(&rhs.y);
         // 6. t3 ← t3 · t4
         t3 = (&t3).mul(&t4);
         // 7. t4 ← t0 + t1
@@ -431,9 +220,9 @@ impl PrimeWeierstrassCurve {
         // 8. t3 ← t3 − t4
         t3 = (&t3).sub(&t4);
         // 9. t4 ← X1 + Z1
-        t4 = (&x1).add(&z1);
+        t4 = (&lhs.x).add(&lhs.z);
         // 10. t5 ← X2 + Z2
-        let mut t5 = (&x2).add(&z2);
+        let mut t5 = (&rhs.x).add(&rhs.z);
         // 11. t4 ← t4 · t5
         t4 = (&t4).mul(&t5);
         // 12. t5 ← t0 + t2
@@ -441,9 +230,9 @@ impl PrimeWeierstrassCurve {
         // 13. t4 ← t4 − t5
         t4 = (&t4).sub(&t5);
         // 14. t5 ← Y1 + Z1
-        t5 = (&y1).add(&z1);
+        t5 = (&lhs.y).add(&lhs.z);
         // 15. X3 ← Y2 + Z2
-        let mut x3 = (&y2).add(&z2);
+        let mut x3 = (&rhs.y).add(&rhs.z);
         // 16. t5 ← t5 · X3
         t5 = (&t5).mul(&x3);
         // 17. X3 ← t1 + t2
@@ -494,74 +283,104 @@ impl PrimeWeierstrassCurve {
         z3 = (&t5).mul(&z3);
         // 40. Z3 ← Z3 + t0
         z3 = (&z3).add(&t0);
-        MontyProjectivePoint::Concrete { x: x3, y: y3, z: z3 }
+        MontyProjectivePoint { x: x3, y: y3, z: z3 }
     }
 
-    pub fn add_points(&self, lhs: &ConcreteProjectivePoint, rhs: &ConcreteProjectivePoint) -> ProjectivePoint {
-        let monty = self.monty_knowledge();
-        let (x1, y1, z1) = (
-            BoxedMontyForm::new(lhs.x.widen(monty.params.bits_precision()), monty.params.clone()),
-            BoxedMontyForm::new(lhs.y.widen(monty.params.bits_precision()), monty.params.clone()),
-            BoxedMontyForm::new(lhs.z.widen(monty.params.bits_precision()), monty.params.clone()),
-        );
-        let (x2, y2, z2) = (
-            BoxedMontyForm::new(rhs.x.widen(monty.params.bits_precision()), monty.params.clone()),
-            BoxedMontyForm::new(rhs.y.widen(monty.params.bits_precision()), monty.params.clone()),
-            BoxedMontyForm::new(rhs.z.widen(monty.params.bits_precision()), monty.params.clone()),
-        );
-        self.add_points_internal(&monty, &x1, &y1, &z1, &x2, &y2, &z2).retrieve()
+    fn internal_point_at_infinity(monty: &MontyKnowledge) -> MontyProjectivePoint {
+        let x = BoxedMontyForm::zero(monty.params.clone());
+        let y = BoxedMontyForm::one(monty.params.clone());
+        let z = BoxedMontyForm::zero(monty.params.clone());
+        MontyProjectivePoint { x, y, z }
     }
 
-    pub fn multiply_scalar_with_point(&self, scalar: &BoxedUint, point: &ConcreteProjectivePoint) -> ProjectivePoint {
+    fn internal_multiply_scalar_with_point(&self, monty: &MontyKnowledge, scalar: &BoxedUint, point: &MontyProjectivePoint) -> MontyProjectivePoint {
+        debug_assert!(bool::from(Self::internal_is_on_curve(monty, point)));
+
+        let mut result = Self::internal_point_at_infinity(monty);
+
         if bool::from(scalar.is_zero()) {
-            return ProjectivePoint::AtInfinity;
+            return result;
         }
 
-        let monty = self.monty_knowledge();
-        let mut result = MontyProjectivePoint::AtInfinity;
-        let mut double_me = MontyProjectivePoint::take_concrete(&point, monty.params.clone());
+        let mut double_me = point.clone();
         for i in 0..scalar.bits() {
-            if bool::from(scalar.bit(i)) {
-                result = match &result {
-                    MontyProjectivePoint::AtInfinity => double_me.clone(),
-                    MontyProjectivePoint::Concrete { x: x1, y: y1, z: z1 } => {
-                        let (x2, y2, z2) = double_me.as_concrete().unwrap();
-                        self.add_points_internal(&monty, x1, y1, z1, x2, y2, z2)
-                    },
-                };
-            }
-            let (x, y, z) = double_me.as_concrete().unwrap();
-            double_me = self.double_point_internal(&monty, x, y, z);
+            let sum = Self::internal_add_points(monty, &result, &double_me);
+            debug_assert!(bool::from(Self::internal_is_on_curve(monty, &sum)));
+            result = if bool::from(scalar.bit(i)) { sum } else { result };
+            double_me = Self::internal_double_point(monty, &double_me);
+            debug_assert!(bool::from(Self::internal_is_on_curve(monty, &double_me)));
         }
-        result.retrieve()
+
+        debug_assert!(bool::from(Self::internal_is_on_curve(monty, &result)));
+
+        result
     }
 
-    pub fn add_affine(&self, left: &AffinePoint, right: &AffinePoint) -> AffinePoint {
-        let left_projective = left.clone().into_projective();
-        let right_projective = right.clone().into_projective();
-        self.add_points(&left_projective, &right_projective)
-            .as_concrete().unwrap()
-            .clone()
-            .into_affine(&self.prime).unwrap()
+    pub fn is_on_curve_affine(&self, point: &AffinePoint) -> Choice {
+        let monty = self.monty_knowledge();
+        let projective = Self::internal_affine_to_monty_projective(&monty, &point);
+        Self::internal_is_on_curve(&monty, &projective)
     }
 
-    pub fn multiply_scalar_with_affine(&self, scalar: &BoxedUint, point: &AffinePoint) -> AffinePoint {
-        let point_projective = point.clone().into_projective();
-        let multiplied_projective = self.multiply_scalar_with_point(scalar, &point_projective);
-        multiplied_projective
-            .as_concrete().unwrap()
-            .clone()
-            .into_affine(&self.prime).unwrap()
-    }
-
+    /// Calculates a public key from a private key.
     pub fn calculate_public_key(&self, private_key: &BoxedUint) -> AffinePoint {
         // public_key = private_key * generator
-        self.multiply_scalar_with_affine(private_key, &self.generator)
+        let monty = self.monty_knowledge();
+        let generator = Self::internal_affine_to_monty_projective(&monty, &self.generator);
+        let product = self.internal_multiply_scalar_with_point(&monty, private_key, &generator);
+
+        let (x, y) = Self::internal_monty_projective_to_affine(&product)
+            .unwrap();
+        AffinePoint {
+            x: x.retrieve(),
+            y: y.retrieve(),
+        }
     }
 
-    pub fn diffie_hellman(&self, private_key: &BoxedUint, other_public_key: &AffinePoint) -> AffinePoint {
+    pub fn diffie_hellman(&self, private_key: &BoxedUint, other_public_key: &AffinePoint) -> CtOption<AffinePoint> {
         // secret_key = private_key * other_public_key
-        self.multiply_scalar_with_affine(private_key, other_public_key)
+        let monty = self.monty_knowledge();
+        let other_pub = Self::internal_affine_to_monty_projective(&monty, other_public_key);
+
+        // defend against skullduggery: check if other public key is on the curve
+        let is_other_pub_on_curve = Self::internal_is_on_curve(&monty, &other_pub);
+
+        let product = self.internal_multiply_scalar_with_point(&monty, private_key, &other_pub);
+
+        let (x, y) = Self::internal_monty_projective_to_affine(&product)
+            .unwrap();
+        let result = AffinePoint {
+            x: x.retrieve(),
+            y: y.retrieve(),
+        };
+
+        CtOption::new(result, is_other_pub_on_curve)
+    }
+
+    pub fn derive_generic_mapping_session_curve(&self, nonce: &BoxedUint, shared_secret: &AffinePoint) -> Self {
+        // new_generator = (nonce * original_generator) + shared_secret
+        let monty = self.monty_knowledge();
+        let generator_proj = Self::internal_affine_to_monty_projective(&monty, &self.generator);
+        let shared_secret_proj = Self::internal_affine_to_monty_projective(&monty, shared_secret);
+
+        let product = self.internal_multiply_scalar_with_point(&monty, nonce, &generator_proj);
+        debug_assert!(bool::from(Self::internal_is_on_curve(&monty, &product)));
+        let sum = Self::internal_add_points(&monty, &product, &shared_secret_proj);
+        debug_assert!(bool::from(Self::internal_is_on_curve(&monty, &sum)));
+
+        let (x, y) = Self::internal_monty_projective_to_affine(&sum)
+            .unwrap();
+        let new_generator = AffinePoint {
+            x: x.retrieve(),
+            y: y.retrieve()
+        };
+
+        Self {
+            prime: self.prime.clone(),
+            coefficient_a: self.coefficient_a.clone(),
+            coefficient_b: self.coefficient_b.clone(),
+            generator: new_generator,
+        }
     }
 }
 
@@ -656,8 +475,8 @@ mod tests {
             ")),
         );
 
-        let terminal_secret = curve.diffie_hellman(&terminal_private, &chip_public);
-        let chip_secret = curve.diffie_hellman(&chip_private, &terminal_public);
+        let terminal_secret = curve.diffie_hellman(&terminal_private, &chip_public).unwrap();
+        let chip_secret = curve.diffie_hellman(&chip_private, &terminal_public).unwrap();
         let shared_secret = AffinePoint::new(
             boxed_uint_from_be_slice(&hex!("
                 60332EF2 450B5D24 7EF6D386 8397D398
@@ -674,29 +493,20 @@ mod tests {
 
         // map a new generator:
         // (nonce * original_generator) + shared_secret
-        let nonced_generator = curve.multiply_scalar_with_affine(&nonce, &generator);
-        let session_generator = curve.add_affine(&nonced_generator, &shared_secret);
+        let session_curve = curve.derive_generic_mapping_session_curve(&nonce, &shared_secret);
         assert_eq!(
-            session_generator.x,
+            session_curve.generator.x,
             boxed_uint_from_be_slice(&hex!("
                 8CED63C9 1426D4F0 EB1435E7 CB1D74A4
                 6723A0AF 21C89634 F65A9AE8 7A9265E2
             ")),
         );
         assert_eq!(
-            session_generator.y,
+            session_curve.generator.y,
             boxed_uint_from_be_slice(&hex!("
                 8C879506 743F8611 AC33645C 5B985C80
                 B5F09A0B 83407C1B 6A4D857A E76FE522
             ")),
-        );
-
-        // set up a curve with the same coefficients but this new generator
-        let session_curve = PrimeWeierstrassCurve::new(
-            prime,
-            coefficient_a,
-            coefficient_b,
-            session_generator,
         );
 
         let session_terminal_private = boxed_uint_from_be_slice(&hex!("
@@ -740,8 +550,8 @@ mod tests {
             ")),
         );
 
-        let session_terminal_secret = session_curve.diffie_hellman(&session_terminal_private, &session_chip_public);
-        let session_chip_secret = session_curve.diffie_hellman(&session_chip_private, &session_terminal_public);
+        let session_terminal_secret = session_curve.diffie_hellman(&session_terminal_private, &session_chip_public).unwrap();
+        let session_chip_secret = session_curve.diffie_hellman(&session_chip_private, &session_terminal_public).unwrap();
         let session_shared_secret = boxed_uint_from_be_slice(&hex!("
             28768D20 701247DA E81804C9 E780EDE5 
             82A9996D B4A31502 0B273319 7DB84925
