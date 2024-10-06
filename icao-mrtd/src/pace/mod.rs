@@ -720,7 +720,11 @@ macro_rules! equals_any {
 /// `card_access` is the data read from the file `EF.CardAccess`; `mrz_data` corresponds to the concatenation of
 /// document number (including check digit), date of birth (including check digit) and date of expiry (including check
 /// digit).
-pub fn establish<'sc, SC: SmartCard>(card: &'sc mut SC, card_access: &[u8], mrz_data: &[u8]) -> Result<Box<dyn SecureMessaging<SC> + 'sc>, CommunicationError> {
+pub fn establish<'sc, SC: SmartCard>(
+    card: &'sc mut SC,
+    card_access: &[u8],
+    mrz_data: &[u8],
+) -> Result<Box<dyn SecureMessaging<SC> + 'sc>, CommunicationError> {
     // card_access is the data in EF.CardAccess, which is DER-encoded
 
     // try to decode its base structure as a SET OF Any (SetOf<Any>)

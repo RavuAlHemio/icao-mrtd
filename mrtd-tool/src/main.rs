@@ -82,18 +82,17 @@ fn main() {
         },
     };
 
-    let mut authenticated = false;
-    match icao_mrtd::iso7816::file::read_file(&mut card, &select_card_access) {
+    let card_access = match icao_mrtd::iso7816::file::read_file(&mut card, &select_card_access) {
         Ok(card_access) => {
             println!("EF.CardAccess:");
             icao_mrtd::hexdump(&card_access);
+            card_access
         },
-        Err(e) => {
-            panic!("failed to read EF.CardAccess: {}", e);
-        },
+        Err(e) => panic!("failed to read EF.CardAccess: {}", e),
     };
 
-    // select eMRTD Application
+    /*
+    // select eMRTD Application (prerequisite for BAC)
     let select_emrtd_app = icao_mrtd::iso7816::apdu::Apdu {
         header: icao_mrtd::iso7816::apdu::CommandHeader {
             cla: 0x00,
@@ -113,6 +112,10 @@ fn main() {
 
     let mut bac = icao_mrtd::bac::establish(&mut card, mrz.mrz_key().as_bytes())
         .expect("failed to establish BAC");
+    */
+
+    let mut pace = icao_mrtd::pace::establish(&mut card, &card_access, mrz.mrz_key().as_bytes())
+        .expect("failed to establish PACE");
 
     /*
     // try reading EF.CardAccess through the encrypted channel
@@ -152,7 +155,8 @@ fn main() {
             response_data_length: 0,
         },
     };
-    match icao_mrtd::iso7816::file::read_file(&mut bac, &select_com) {
+    //match icao_mrtd::iso7816::file::read_file(&mut bac, &select_com) {
+    match icao_mrtd::iso7816::file::read_file(&mut pace, &select_com) {
         Ok(com) => {
             println!("EF.COM:");
             icao_mrtd::hexdump(&com);

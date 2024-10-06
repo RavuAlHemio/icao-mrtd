@@ -5,7 +5,7 @@ use std::fmt;
 
 use aes::{Aes128, Aes192, Aes256};
 use block_padding::NoPadding;
-use cipher::{BlockCipherEncrypt, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
+use cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use cmac::{Cmac, KeyInit, Mac};
 use des::{Des, TdesEde2};
 use digest::{Digest, DynDigest};
@@ -651,6 +651,11 @@ pub trait SecureMessaging<SC: SmartCard> {
         Ok(response)
     }
 }
+impl<'sc, SC: SmartCard> SmartCard for Box<dyn SecureMessaging<SC> + 'sc> {
+    fn communicate(&mut self, request: &crate::iso7816::apdu::Apdu) -> Result<crate::iso7816::apdu::Response, CommunicationError> {
+        SecureMessaging::communicate(&mut **self, request)
+    }
+}
 
 /// Secure messaging using 3DES.
 ///
@@ -871,11 +876,10 @@ impl<'sc, SC: SmartCard> SmAes256<'sc, SC> {
     }
 
     fn derive_iv(&self) -> [u8; 16] {
-        let encryptor = Aes256::new_from_slice(&self.k_session_enc).unwrap();
-        let mut iv = self.send_sequence_counter.clone();
-        let iv_len = iv.len();
-        encryptor.encrypt_padded::<NoPadding>(&mut iv, iv_len).unwrap();
-        iv
+        let derivation_iv = [0u8; 16];
+        let mut actual_iv = self.send_sequence_counter.clone();
+        SmoAes256.encrypt_padded_data(&mut actual_iv, &self.k_session_enc, &derivation_iv);
+        actual_iv
     }
 }
 impl<'sc, SC: SmartCard> SecureMessaging<SC> for SmAes256<'sc, SC> {
