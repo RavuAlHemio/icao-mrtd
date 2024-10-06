@@ -1,3 +1,9 @@
+//! Elliptic-curve cryptography.
+
+
+pub(crate) mod curves;
+
+
 use std::ops::{Add, Mul};
 
 use crypto_bigint::{BoxedUint, Integer};
@@ -553,7 +559,7 @@ mod tests {
         let session_terminal_secret = session_curve.diffie_hellman(&session_terminal_private, &session_chip_public).unwrap();
         let session_chip_secret = session_curve.diffie_hellman(&session_chip_private, &session_terminal_public).unwrap();
         let session_shared_secret = boxed_uint_from_be_slice(&hex!("
-            28768D20 701247DA E81804C9 E780EDE5 
+            28768D20 701247DA E81804C9 E780EDE5
             82A9996D B4A31502 0B273319 7DB84925
         "));
         assert_eq!(session_terminal_secret.x, session_shared_secret);

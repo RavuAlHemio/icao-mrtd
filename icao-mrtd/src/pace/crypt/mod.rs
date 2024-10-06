@@ -1,19 +1,14 @@
 //! Cryptographic functionality for PACE.
 
 
-mod dh;
-mod elliptic;
+pub(crate) mod dh;
+pub(crate) mod elliptic;
 
 
-use crate::pace::crypt::dh::DiffieHellman;
-use crate::pace::crypt::elliptic::PrimeWeierstrassCurve;
+use crypto_bigint::BoxedUint;
 
 
-pub enum AnyDiffieHellman {
-    Classic(DiffieHellman),
-    EllipticCurve(PrimeWeierstrassCurve),
-}
-
-
-pub struct ProtocolSet {
+pub(crate) fn boxed_uint_from_be_slice(slice: &[u8]) -> BoxedUint {
+    let bits: u32 = (8 * slice.len()).try_into().unwrap();
+    BoxedUint::from_be_slice(slice, bits).unwrap()
 }

@@ -12,7 +12,7 @@ use sha1::Sha1;
 
 use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::iso7816::apdu::{Apdu, CommandHeader, Data};
-use crate::secure_messaging::{Error, MismatchedValue, Operation, SecureMessaging, Sm3Des};
+use crate::secure_messaging::{Error, Kdf3Des, KeyDerivation, MismatchedValue, Operation, Sm3Des};
 
 
 type RetailMacDes = RetailMac<Des>;
@@ -55,8 +55,8 @@ pub fn establish_from_values<'c, SC: SmartCard>(
 ) -> Result<Sm3Des<'c, SC>, CommunicationError> {
     // derive the keys
     // (the key derivation functions have remained the same with PACE)
-    let k_enc = Sm3Des::<SC>::derive_encryption_key(k_seed);
-    let k_mac = Sm3Des::<SC>::derive_mac_key(k_seed);
+    let k_enc = Kdf3Des::derive_encryption_key(k_seed);
+    let k_mac = Kdf3Des::derive_mac_key(k_seed);
 
     // concatenate the three values
     let mut ext_auth_data = [0u8; 32+8];
@@ -66,7 +66,7 @@ pub fn establish_from_values<'c, SC: SmartCard>(
 
     // encrypt using 3DES (EDE 2-key) in CBC mode with an all-zeroes IV and no padding
     let iv = [0u8; 8];
-    let encryptor: cbc::Encryptor<TdesEde2> = cbc::Encryptor::new(&k_enc.into(), &iv.into());
+    let encryptor: cbc::Encryptor<TdesEde2> = cbc::Encryptor::new(k_enc.as_slice().try_into().unwrap(), &iv.into());
     encryptor.encrypt_padded::<NoPadding>(&mut ext_auth_data[0..32], 32).unwrap();
     // ext_auth_data[0..32] is now encrypted
 
@@ -117,7 +117,7 @@ pub fn establish_from_values<'c, SC: SmartCard>(
 
     // decrypt
     let iv = [0u8; 8];
-    let decryptor: cbc::Decryptor<TdesEde2> = cbc::Decryptor::new(&k_enc.into(), &iv.into());
+    let decryptor: cbc::Decryptor<TdesEde2> = cbc::Decryptor::new(&k_enc.as_slice().try_into().unwrap(), &iv.into());
     let decrypted_slice = decryptor.decrypt_padded::<NoPadding>(&mut ext_auth_response.data[0..32]).unwrap();
 
     let mut rnd_ic_second = [0u8; 8];
@@ -139,8 +139,8 @@ pub fn establish_from_values<'c, SC: SmartCard>(
         *kss = *kifd ^ *kic;
     }
 
-    let k_session_enc = Sm3Des::<SC>::derive_encryption_key(&k_session_seed);
-    let k_session_mac = Sm3Des::<SC>::derive_mac_key(&k_session_seed);
+    let k_session_enc = Kdf3Des::derive_encryption_key(&k_session_seed);
+    let k_session_mac = Kdf3Des::derive_mac_key(&k_session_seed);
 
     let mut send_sequence_counter = [0u8; 8];
     send_sequence_counter[0..4].copy_from_slice(&rnd_ic[4..8]);
@@ -148,8 +148,8 @@ pub fn establish_from_values<'c, SC: SmartCard>(
 
     Ok(Sm3Des::new(
         card,
-        k_session_enc,
-        k_session_mac,
+        k_session_enc.as_slice().try_into().unwrap(),
+        k_session_mac.as_slice().try_into().unwrap(),
         send_sequence_counter,
     ))
 }

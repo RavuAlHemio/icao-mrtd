@@ -14,6 +14,9 @@ use crate::der_util;
 use crate::iso7816::apdu::{Apdu, CommandHeader, Data, Response};
 use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::pace::asn1::PaceInfo;
+use crate::pace::crypt::dh::DiffieHellmanParams;
+use crate::pace::crypt::elliptic::PrimeWeierstrassCurve;
+use crate::secure_messaging::SecureMessaging;
 
 
 macro_rules! pace_oids {
@@ -89,6 +92,10 @@ pub enum Error {
         response: Response,
     },
     CustomParameters,
+    IncompatibleProtocolParameter {
+        protocol: ObjectIdentifier,
+        parameter: i32,
+    },
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -107,6 +114,8 @@ impl fmt::Display for Error {
                 => write!(f, "operation {:?} failed with response code 0x{:04X}", operation, response.trailer.to_word()),
             Self::CustomParameters
                 => write!(f, "custom parameters are not currently supported"),
+            Self::IncompatibleProtocolParameter { protocol, parameter }
+                => write!(f, "protocol {} is incompatible with parameter {}", protocol, parameter),
         }
     }
 }
@@ -120,6 +129,7 @@ impl std::error::Error for Error {
             Self::CardAccessEntryDecodingPace { .. } => None,
             Self::OperationFailed { .. } => None,
             Self::CustomParameters => None,
+            Self::IncompatibleProtocolParameter { .. } => None,
         }
     }
 }
@@ -129,6 +139,19 @@ impl std::error::Error for Error {
 pub enum PasswordSource {
     Mrz,
     Can,
+}
+
+
+enum KeyExchange {
+    ClassicDiffieHellman(DiffieHellmanParams),
+    PrimeWeierstrassEllipticDiffieHellman(PrimeWeierstrassCurve),
+}
+
+enum CipherAndMac {
+    ThreeDesCipherCbcMac,
+    Aes128CipherCmacMac,
+    Aes192CipherCmacMac,
+    Aes256CipherCmacMac,
 }
 
 
@@ -202,8 +225,26 @@ pub fn obtain_encrypted_nonce<SC: SmartCard>(card: &mut SC) -> Result<Vec<u8>, C
 }
 
 
+/// Performs a key exchange using classic Diffie-Hellman.
+fn perform_kex_classic_dh<SC: SmartCard>(card: &mut SC, params: DiffieHellmanParams, cipher_and_mac: CipherAndMac) -> Result<Box<dyn SecureMessaging<SC>>, Error> {
+    todo!();
+}
+
+/// Performs a key exchange using elliptic-curve Diffie-Hellman on a prime Weierstrass curve.
+fn perform_kex_weierstrass_ecdh<SC: SmartCard>(card: &mut SC, curve: PrimeWeierstrassCurve, cipher_and_mac: CipherAndMac) -> Result<Box<dyn SecureMessaging<SC>>, Error> {
+    todo!();
+}
+
+
+macro_rules! equals_any {
+    ($template:expr, $option1:expr $(, $options:expr)* $(,)?) => {
+        ($template == $option1 $(|| $template == $options)*)
+    };
+}
+
+
 /// Authenticates with the card using PACE.
-pub fn establish(card: &pcsc::Card, card_access: &[u8]) -> Result<(), Error> {
+pub fn establish<SC: SmartCard>(card: &mut SC, card_access: &[u8]) -> Result<Box<dyn SecureMessaging<SC>>, Error> {
     // card_access is the data in EF.CardAccess, which is DER-encoded
 
     // try to decode its base structure as a SET OF Any (SetOf<Any>)
@@ -230,17 +271,15 @@ pub fn establish(card: &pcsc::Card, card_access: &[u8]) -> Result<(), Error> {
             // not relevant
             continue;
         }
-        if security_info_oid == PACE_DH_IM_3DES_CBC_CBC
-                || security_info_oid == PACE_DH_IM_AES_CBC_CMAC_128
-                || security_info_oid == PACE_DH_IM_AES_CBC_CMAC_192
-                || security_info_oid == PACE_DH_IM_AES_CBC_CMAC_256
-                || security_info_oid == PACE_ECDH_IM_3DES_CBC_CBC
-                || security_info_oid == PACE_ECDH_IM_AES_CBC_CMAC_128
-                || security_info_oid == PACE_ECDH_IM_AES_CBC_CMAC_192
-                || security_info_oid == PACE_ECDH_IM_AES_CBC_CMAC_256
-                || security_info_oid == PACE_ECDH_CAM_AES_CBC_CMAC_128
-                || security_info_oid == PACE_ECDH_CAM_AES_CBC_CMAC_192
-                || security_info_oid == PACE_ECDH_CAM_AES_CBC_CMAC_256 {
+        if equals_any!(
+            security_info_oid,
+            PACE_DH_IM_3DES_CBC_CBC, PACE_DH_IM_AES_CBC_CMAC_128,
+            PACE_DH_IM_AES_CBC_CMAC_192, PACE_DH_IM_AES_CBC_CMAC_256,
+            PACE_ECDH_IM_3DES_CBC_CBC, PACE_ECDH_IM_AES_CBC_CMAC_128,
+            PACE_ECDH_IM_AES_CBC_CMAC_192, PACE_ECDH_IM_AES_CBC_CMAC_256,
+            PACE_ECDH_CAM_AES_CBC_CMAC_128, PACE_ECDH_CAM_AES_CBC_CMAC_192,
+            PACE_ECDH_CAM_AES_CBC_CMAC_256,
+        ) {
             unsupported_mapping = Some(security_info_oid.clone());
             continue;
         }
@@ -265,28 +304,59 @@ pub fn establish(card: &pcsc::Card, card_access: &[u8]) -> Result<(), Error> {
     };
 
     // we currently only support standard parameters (Doc 9303 Part 11 § 9.5.1)
-    let pace_parameter_id = pace_info.parameter_id
+    let pace_parameter_id_integer = pace_info.parameter_id
         .ok_or(Error::CustomParameters)?;
+    let pace_parameter_id = pace_parameter_id_integer.try_into()
+        .map_err(|_| Error::CustomParameters)?;
 
-    if pace_info.protocol == PACE_DH_GM_3DES_CBC_CBC {
-        // regular Diffie-Hellman, 3DES-CBC for encryption, CBC-MAC for verification
-    } else if pace_info.protocol == PACE_DH_GM_AES_CBC_CMAC_128 {
-        // regular Diffie-Hellman, AES128-CBC for encryption, CMAC for verification
-    } else if pace_info.protocol == PACE_DH_GM_AES_CBC_CMAC_192 {
-        // regular Diffie-Hellman, AES192-CBC for encryption, CMAC for verification
-    } else if pace_info.protocol == PACE_DH_GM_AES_CBC_CMAC_256 {
-        // regular Diffie-Hellman, AES256-CBC for encryption, CMAC for verification
-    } else if pace_info.protocol == PACE_ECDH_GM_3DES_CBC_CBC {
-        // elliptic-curve Diffie-Hellman, 3DES-CBC for encryption, CBC-MAC for verification
-    } else if pace_info.protocol == PACE_ECDH_GM_AES_CBC_CMAC_128 {
-        // elliptic-curve Diffie-Hellman, AES128-CBC for encryption, CMAC for verification
-    } else if pace_info.protocol == PACE_ECDH_GM_AES_CBC_CMAC_192 {
-        // elliptic-curve Diffie-Hellman, AES192-CBC for encryption, CMAC for verification
-    } else if pace_info.protocol == PACE_ECDH_GM_AES_CBC_CMAC_256 {
-        // elliptic-curve Diffie-Hellman, AES256-CBC for encryption, CMAC for verification
+    let key_exchange = if equals_any!(
+        pace_info.protocol,
+        PACE_DH_GM_3DES_CBC_CBC, PACE_DH_GM_AES_CBC_CMAC_128,
+        PACE_DH_GM_AES_CBC_CMAC_192, PACE_DH_GM_AES_CBC_CMAC_256,
+    ) {
+        match pace_parameter_id {
+            0 => KeyExchange::ClassicDiffieHellman(crate::pace::crypt::dh::params::get_1024_modp_160_po()),
+            1 => KeyExchange::ClassicDiffieHellman(crate::pace::crypt::dh::params::get_2048_modp_224_po()),
+            2 => KeyExchange::ClassicDiffieHellman(crate::pace::crypt::dh::params::get_2048_modp_256_po()),
+            other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }),
+        }
+    } else if equals_any!(
+        pace_info.protocol,
+        PACE_ECDH_GM_3DES_CBC_CBC, PACE_ECDH_GM_AES_CBC_CMAC_128,
+        PACE_ECDH_GM_AES_CBC_CMAC_192, PACE_ECDH_GM_AES_CBC_CMAC_256,
+    ) {
+        // elliptic-curve Diffie-Hellman
+        match pace_parameter_id {
+            8 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p192()),
+            9 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p192r1()),
+            10 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p224()),
+            11 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p224r1()),
+            12 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p256()),
+            13 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p256r1()),
+            14 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p320r1()),
+            15 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p384()),
+            16 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p384r1()),
+            17 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p512r1()),
+            18 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p521()),
+            other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }),
+        }
     } else {
         unreachable!()
-    }
+    };
+    let cipher_and_mac = if equals_any!(pace_info.protocol, PACE_DH_GM_3DES_CBC_CBC, PACE_ECDH_GM_3DES_CBC_CBC) {
+        CipherAndMac::ThreeDesCipherCbcMac
+    } else if equals_any!(pace_info.protocol, PACE_DH_GM_AES_CBC_CMAC_128, PACE_ECDH_GM_AES_CBC_CMAC_128) {
+        CipherAndMac::Aes128CipherCmacMac
+    } else if equals_any!(pace_info.protocol, PACE_DH_GM_AES_CBC_CMAC_192, PACE_ECDH_GM_AES_CBC_CMAC_192) {
+        CipherAndMac::Aes192CipherCmacMac
+    } else if equals_any!(pace_info.protocol, PACE_DH_GM_AES_CBC_CMAC_256, PACE_ECDH_GM_AES_CBC_CMAC_256) {
+        CipherAndMac::Aes256CipherCmacMac
+    } else {
+        unreachable!()
+    };
 
-    todo!();
+    match key_exchange {
+        KeyExchange::ClassicDiffieHellman(params) => perform_kex_classic_dh(card, params, cipher_and_mac),
+        KeyExchange::PrimeWeierstrassEllipticDiffieHellman(curve) => perform_kex_weierstrass_ecdh(card, curve, cipher_and_mac),
+    }
 }

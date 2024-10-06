@@ -13,6 +13,8 @@ use retail_mac::RetailMac;
 use sha1::Sha1;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
+use zeroize_derive::ZeroizeOnDrop;
 
 use crate::iso7816::apdu::{Apdu, Data, Response, ResponseTrailer};
 use crate::iso7816::card::{CommunicationError, SmartCard};
@@ -114,15 +116,132 @@ struct BorrowedTlv<'d> {
 }
 
 
+/// Operations for Secure Messaging key derivation.
+pub trait KeyDerivation {
+    /// Size of the cipher key in bytes.
+    fn cipher_key_size() -> usize;
+
+    /// The key derivation function.
+    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>>;
+
+    /// The key derivation function for encryption purposes.
+    fn derive_encryption_key(key_seed: &[u8]) -> Zeroizing<Vec<u8>> {
+        Self::derive_key(key_seed, 1)
+    }
+
+    /// The key derivation function for message authentication purposes.
+    fn derive_mac_key(key_seed: &[u8]) -> Zeroizing<Vec<u8>> {
+        Self::derive_key(key_seed, 2)
+    }
+
+    /// The password-to-key derivation function.
+    fn derive_key_from_password(password: &[u8]) -> Zeroizing<Vec<u8>> {
+        Self::derive_key(password, 3)
+    }
+}
+
+
+/// Key derivation for secure messaging using 3DES.
+///
+/// 3DES is used in EDE two-key mode, i.e. `K3 = K1`.
+///
+/// The KDF is equivalent to:
+/// ```plain
+/// keydata = sha1(key || counter)[0..16]
+/// ```
+/// whereupon
+/// ```plain
+/// K1 = keydata[0..8]
+/// K2 = keydata[8..16]
+/// ```
+pub struct Kdf3Des;
+impl KeyDerivation for Kdf3Des {
+    fn cipher_key_size() -> usize { 16 }
+
+    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+        let mut hasher = Sha1::new();
+        DynDigest::update(&mut hasher, key_seed);
+        DynDigest::update(&mut hasher, &counter.to_be_bytes());
+        let result = hasher.finalize();
+
+        Zeroizing::new(result[0..Self::cipher_key_size()].to_vec())
+    }
+}
+
+
+/// Key derivation for secure messaging using AES-128.
+///
+/// The KDF is equivalent to:
+/// ```plain
+/// keydata = sha1(key || counter)[0..16]
+/// ```
+pub struct KdfAes128;
+impl KeyDerivation for KdfAes128 {
+    fn cipher_key_size() -> usize { 16 }
+
+    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+        let mut hasher = Sha1::new();
+        DynDigest::update(&mut hasher, key_seed);
+        DynDigest::update(&mut hasher, &counter.to_be_bytes());
+        let result = hasher.finalize();
+
+        Zeroizing::new(result[0..Self::cipher_key_size()].to_vec())
+    }
+}
+
+
+/// Key derivation for secure messaging using AES-192.
+///
+/// The KDF is equivalent to:
+/// ```plain
+/// keydata = sha256(key || counter)[0..24]
+/// ```
+pub struct KdfAes192;
+impl KeyDerivation for KdfAes192 {
+    fn cipher_key_size() -> usize { 24 }
+
+    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+        let mut hasher = Sha256::new();
+        DynDigest::update(&mut hasher, key_seed);
+        DynDigest::update(&mut hasher, &counter.to_be_bytes());
+        let result = hasher.finalize();
+
+        Zeroizing::new(result[0..Self::cipher_key_size()].to_vec())
+    }
+}
+
+
+/// Key derivation for secure messaging using AES-256.
+///
+/// The KDF is equivalent to:
+/// ```plain
+/// keydata = sha256(key || counter)
+/// ```
+pub struct KdfAes256;
+impl KeyDerivation for KdfAes256 {
+    fn cipher_key_size() -> usize { 32 }
+
+    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+        let mut hasher = Sha256::new();
+        DynDigest::update(&mut hasher, key_seed);
+        DynDigest::update(&mut hasher, &counter.to_be_bytes());
+        let result = hasher.finalize();
+
+        Zeroizing::new(result[0..Self::cipher_key_size()].to_vec())
+    }
+}
+
+
 /// Operations for Secure Messaging.
 pub trait SecureMessaging<SC: SmartCard> {
-    type Key;
+    /// Size of the cipher key in bytes.
+    fn cipher_key_size(&self) -> usize;
 
     /// The block size of the underlying cipher in bytes.
-    fn cipher_block_size() -> usize;
+    fn cipher_block_size(&self) -> usize;
 
     /// The block size of the underlying MAC algorithm in bytes.
-    fn mac_block_size() -> usize;
+    fn mac_block_size(&self) -> usize;
 
     /// Obtain the underlying smart card for smart-card operations.
     fn get_smart_card_mut(&mut self) -> &mut SC;
@@ -131,21 +250,21 @@ pub trait SecureMessaging<SC: SmartCard> {
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8];
 
     /// The key derivation function.
-    fn derive_key(key_seed: &[u8], counter: u32) -> Self::Key;
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>>;
 
     /// The key derivation function for encryption purposes.
-    fn derive_encryption_key(key_seed: &[u8]) -> Self::Key {
-        Self::derive_key(key_seed, 1)
+    fn derive_encryption_key(&self, key_seed: &[u8]) -> Zeroizing<Vec<u8>> {
+        self.derive_key(key_seed, 1)
     }
 
     /// The key derivation function for message authentication purposes.
-    fn derive_mac_key(key_seed: &[u8]) -> Self::Key {
-        Self::derive_key(key_seed, 2)
+    fn derive_mac_key(&self, key_seed: &[u8]) -> Zeroizing<Vec<u8>> {
+        self.derive_key(key_seed, 2)
     }
 
     /// The password-to-key derivation function.
-    fn derive_key_from_password(password: &[u8]) -> Self::Key {
-        Self::derive_key(password, 3)
+    fn derive_key_from_password(&self, password: &[u8]) -> Zeroizing<Vec<u8>> {
+        self.derive_key(password, 3)
     }
 
     /// Increment the send sequence counter and return the incremented value.
@@ -189,6 +308,8 @@ pub trait SecureMessaging<SC: SmartCard> {
 
     fn communicate(&mut self, request: &Apdu) -> Result<Response, CommunicationError> {
         let mut my_request = request.clone();
+        let mac_block_size = self.mac_block_size();
+        let cipher_block_size = self.cipher_block_size();
 
         // add secure messaging mark to CLA (header is part of MAC)
         my_request.header.cla |= 0b000_0_11_00;
@@ -201,7 +322,7 @@ pub trait SecureMessaging<SC: SmartCard> {
             my_request.header.p2,
             0x80,
         ];
-        while padded_header.len() % Self::mac_block_size() != 0 {
+        while padded_header.len() % mac_block_size != 0 {
             padded_header.push(0x00);
         }
 
@@ -220,7 +341,7 @@ pub trait SecureMessaging<SC: SmartCard> {
             let mut padded_data = request_data.to_vec();
             // append padding
             padded_data.push(0x80);
-            while padded_data.len() % Self::cipher_block_size() != 0 {
+            while padded_data.len() % cipher_block_size != 0 {
                 padded_data.push(0x00);
             }
 
@@ -262,7 +383,7 @@ pub trait SecureMessaging<SC: SmartCard> {
         mac_data.extend(&body_data);
         // add padding
         mac_data.push(0x80);
-        while mac_data.len() % Self::mac_block_size() != 0 {
+        while mac_data.len() % mac_block_size != 0 {
             mac_data.push(0x00);
         }
         // compute MAC
@@ -346,7 +467,7 @@ pub trait SecureMessaging<SC: SmartCard> {
             data.extend(field.data);
         }
         data.push(0x80);
-        while data.len() % Self::mac_block_size() != 0 {
+        while data.len() & mac_block_size != 0 {
             data.push(0x00);
         }
         if !self.verify_mac_padded_data(&data, received_mac) {
@@ -402,19 +523,10 @@ pub trait SecureMessaging<SC: SmartCard> {
 
 /// Secure messaging using 3DES.
 ///
-/// 3DES is used in EDE two-key mode, i.e. `K3 = K1`.
-///
-/// The KDF is equivalent to:
-/// ```plain
-/// keydata = sha1(key || counter)[0..16]
-/// ```
-/// whereupon
-/// ```plain
-/// K1 = keydata[0..8]
-/// K2 = keydata[8..16]
-/// ```
+/// 3DES is used in EDE two-key mode, i.e. `K3 = K1`. Keys are derived using [`Kdf3Des`].
+#[derive(ZeroizeOnDrop)]
 pub struct Sm3Des<'sc, SC: SmartCard> {
-    card: &'sc mut SC,
+    #[zeroize(skip)] card: &'sc mut SC,
     k_session_enc: [u8; 16],
     k_session_mac: [u8; 16],
     send_sequence_counter: [u8; 8],
@@ -435,24 +547,16 @@ impl<'sc, SC: SmartCard> Sm3Des<'sc, SC> {
     }
 }
 impl<'sc, SC: SmartCard> SecureMessaging<SC> for Sm3Des<'sc, SC> {
-    type Key = [u8; 16];
-
-    fn derive_key(key_seed: &[u8], counter: u32) -> [u8; 16] {
-        let mut hasher = Sha1::new();
-        DynDigest::update(&mut hasher, key_seed);
-        DynDigest::update(&mut hasher, &counter.to_be_bytes());
-        let result = hasher.finalize();
-
-        let mut keydata = [0u8; 16];
-        keydata.copy_from_slice(&result[0..16]);
-        keydata
-    }
-
-    fn cipher_block_size() -> usize { 8 }
-    fn mac_block_size() -> usize { 8 }
+    fn cipher_key_size(&self) -> usize { Kdf3Des::cipher_key_size() }
+    fn cipher_block_size(&self) -> usize { 8 }
+    fn mac_block_size(&self) -> usize { 8 }
 
     fn get_smart_card_mut(&mut self) -> &mut SC { &mut self.card }
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8] { &mut self.send_sequence_counter }
+
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+        Kdf3Des::derive_key(key_seed, counter)
+    }
 
     fn decrypt_padded_data(&self, data: &mut [u8]) {
         let iv = [0u8; 8];
@@ -490,12 +594,10 @@ impl<'sc, SC: SmartCard> SmartCard for Sm3Des<'sc, SC> {
 
 /// Secure messaging using AES-128.
 ///
-/// The KDF is equivalent to:
-/// ```plain
-/// keydata = sha1(key || counter)[0..16]
-/// ```
+/// Keys are derived using [`KdfAes128`].
+#[derive(ZeroizeOnDrop)]
 pub struct SmAes128<'sc, SC: SmartCard> {
-    card: &'sc mut SC,
+    #[zeroize(skip)] card: &'sc mut SC,
     k_session_enc: [u8; 16],
     k_session_mac: [u8; 16],
     send_sequence_counter: [u8; 16],
@@ -510,23 +612,15 @@ impl<'sc, SC: SmartCard> SmAes128<'sc, SC> {
     }
 }
 impl<'sc, SC: SmartCard> SecureMessaging<SC> for SmAes128<'sc, SC> {
-    type Key = [u8; 16];
-
-    fn cipher_block_size() -> usize { 16 }
-    fn mac_block_size() -> usize { 1 }
+    fn cipher_key_size(&self) -> usize { KdfAes128::cipher_key_size() }
+    fn cipher_block_size(&self) -> usize { 16 }
+    fn mac_block_size(&self) -> usize { 1 }
 
     fn get_smart_card_mut(&mut self) -> &mut SC { &mut self.card }
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8] { &mut self.send_sequence_counter }
 
-    fn derive_key(key_seed: &[u8], counter: u32) -> [u8; 16] {
-        let mut hasher = Sha1::new();
-        DynDigest::update(&mut hasher, key_seed);
-        DynDigest::update(&mut hasher, &counter.to_be_bytes());
-        let result = hasher.finalize();
-
-        let mut keydata = [0u8; 16];
-        keydata.copy_from_slice(&result[0..16]);
-        keydata
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+        KdfAes128::derive_key(key_seed, counter)
     }
 
     fn decrypt_padded_data(&self, data: &mut [u8]) {
@@ -560,12 +654,10 @@ impl<'sc, SC: SmartCard> SmartCard for SmAes128<'sc, SC> {
 
 /// Secure messaging using AES-192.
 ///
-/// The KDF is equivalent to:
-/// ```plain
-/// keydata = sha256(key || counter)[0..24]
-/// ```
+/// Keys are derived using [`KdfAes192`].
+#[derive(ZeroizeOnDrop)]
 pub struct SmAes192<'sc, SC: SmartCard> {
-    card: &'sc mut SC,
+    #[zeroize(skip)] card: &'sc mut SC,
     k_session_enc: [u8; 24],
     k_session_mac: [u8; 24],
     send_sequence_counter: [u8; 16],
@@ -580,23 +672,15 @@ impl<'sc, SC: SmartCard> SmAes192<'sc, SC> {
     }
 }
 impl<'sc, SC: SmartCard> SecureMessaging<SC> for SmAes192<'sc, SC> {
-    type Key = [u8; 24];
-
-    fn cipher_block_size() -> usize { 16 }
-    fn mac_block_size() -> usize { 1 }
+    fn cipher_key_size(&self) -> usize { KdfAes192::cipher_key_size() }
+    fn cipher_block_size(&self) -> usize { 16 }
+    fn mac_block_size(&self) -> usize { 1 }
 
     fn get_smart_card_mut(&mut self) -> &mut SC { &mut self.card }
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8] { &mut self.send_sequence_counter }
 
-    fn derive_key(key_seed: &[u8], counter: u32) -> Self::Key {
-        let mut hasher = Sha256::new();
-        DynDigest::update(&mut hasher, key_seed);
-        DynDigest::update(&mut hasher, &counter.to_be_bytes());
-        let result = hasher.finalize();
-
-        let mut keydata = [0u8; 24];
-        keydata.copy_from_slice(&result[0..24]);
-        keydata
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+        KdfAes192::derive_key(key_seed, counter)
     }
 
     fn decrypt_padded_data(&self, data: &mut [u8]) {
@@ -630,12 +714,10 @@ impl<'sc, SC: SmartCard> SmartCard for SmAes192<'sc, SC> {
 
 /// Key derivation function for AES-256.
 ///
-/// The KDF is equivalent to:
-/// ```plain
-/// keydata = sha256(key || counter)
-/// ```
+/// Keys are derived using [`KdfAes256`].
+#[derive(ZeroizeOnDrop)]
 pub struct SmAes256<'sc, SC: SmartCard> {
-    card: &'sc mut SC,
+    #[zeroize(skip)] card: &'sc mut SC,
     k_session_enc: [u8; 32],
     k_session_mac: [u8; 32],
     send_sequence_counter: [u8; 16],
@@ -650,23 +732,15 @@ impl<'sc, SC: SmartCard> SmAes256<'sc, SC> {
     }
 }
 impl<'sc, SC: SmartCard> SecureMessaging<SC> for SmAes256<'sc, SC> {
-    type Key = [u8; 32];
-
-    fn cipher_block_size() -> usize { 8 }
-    fn mac_block_size() -> usize { 1 }
+    fn cipher_key_size(&self) -> usize { KdfAes256::cipher_key_size() }
+    fn cipher_block_size(&self) -> usize { 8 }
+    fn mac_block_size(&self) -> usize { 1 }
 
     fn get_smart_card_mut(&mut self) -> &mut SC { &mut self.card }
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8] { &mut self.send_sequence_counter }
 
-    fn derive_key(key_seed: &[u8], counter: u32) -> Self::Key {
-        let mut hasher = Sha256::new();
-        DynDigest::update(&mut hasher, key_seed);
-        DynDigest::update(&mut hasher, &counter.to_be_bytes());
-        let result = hasher.finalize();
-
-        let mut keydata = [0u8; 32];
-        keydata.copy_from_slice(&result[0..32]);
-        keydata
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+        KdfAes256::derive_key(key_seed, counter)
     }
 
     fn decrypt_padded_data(&self, data: &mut [u8]) {
