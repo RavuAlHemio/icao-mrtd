@@ -4,6 +4,8 @@
 use std::fmt;
 use std::io::{self, Write};
 
+use zeroize_derive::ZeroizeOnDrop;
+
 
 #[derive(Debug)]
 pub enum WriteError {
@@ -34,7 +36,7 @@ impl From<io::Error> for WriteError {
 }
 
 
-#[derive(Clone, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Default, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub struct CommandHeader {
     pub cla: u8,
     pub ins: u8,
@@ -69,7 +71,7 @@ impl fmt::Debug for CommandHeader {
     }
 }
 
-#[derive(Clone, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Default, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub struct ResponseTrailer {
     pub sw1: u8,
     pub sw2: u8,
@@ -103,7 +105,7 @@ impl fmt::Debug for ResponseTrailer {
 }
 
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub enum Data {
     NoData,
     RequestDataShort {
@@ -264,7 +266,7 @@ impl Data {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub struct Apdu {
     pub header: CommandHeader,
     pub data: Data,
@@ -277,7 +279,7 @@ impl Apdu {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub struct Response {
     pub data: Vec<u8>,
     pub trailer: ResponseTrailer,

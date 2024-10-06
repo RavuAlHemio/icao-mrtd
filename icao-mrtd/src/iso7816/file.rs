@@ -382,5 +382,5 @@ pub fn read_file<SC: SmartCard>(card: &mut SC, select_apdu: &apdu::Apdu) -> Resu
     if read_response.trailer.to_word() != 0x9000 {
         return Err(ReadError::ReadFailed(read_response));
     }
-    Ok(read_response.data)
+    Ok(read_response.data.clone())
 }

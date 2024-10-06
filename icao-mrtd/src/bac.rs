@@ -1,21 +1,17 @@
 //! Basic Access Control.
 
 
-use block_padding::{Iso7816, NoPadding, RawPadding};
-use cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyInit, KeyIvInit};
-use des::{Des, TdesEde2};
-use digest::{Digest, DynDigest, Mac};
+use block_padding::{Iso7816, RawPadding};
+use digest::Digest;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use retail_mac::RetailMac;
 use sha1::Sha1;
 
 use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::iso7816::apdu::{Apdu, CommandHeader, Data};
-use crate::secure_messaging::{Error, Kdf3Des, KeyDerivation, MismatchedValue, Operation, Sm3Des};
-
-
-type RetailMacDes = RetailMac<Des>;
+use crate::secure_messaging::{
+    Error, MismatchedValue, Operation, SecureMessagingOperations, Sm3Des, Smo3Des,
+};
 
 
 fn get_challenge<SC: SmartCard>(card: &mut SC) -> Result<[u8; 8], CommunicationError> {
@@ -37,7 +33,7 @@ fn get_challenge<SC: SmartCard>(card: &mut SC) -> Result<[u8; 8], CommunicationE
     if response.data.len() != 8 {
         return Err(Error::LengthMismatch {
             operation: Operation::GetChallenge,
-            obtained: response.data,
+            obtained: response.data.clone(),
             expected_length: 8,
         }.into());
     }
@@ -55,8 +51,8 @@ pub fn establish_from_values<'c, SC: SmartCard>(
 ) -> Result<Sm3Des<'c, SC>, CommunicationError> {
     // derive the keys
     // (the key derivation functions have remained the same with PACE)
-    let k_enc = Kdf3Des::derive_encryption_key(k_seed);
-    let k_mac = Kdf3Des::derive_mac_key(k_seed);
+    let k_enc = Smo3Des.derive_encryption_key(k_seed);
+    let k_mac = Smo3Des.derive_mac_key(k_seed);
 
     // concatenate the three values
     let mut ext_auth_data = [0u8; 32+8];
@@ -64,18 +60,17 @@ pub fn establish_from_values<'c, SC: SmartCard>(
     ext_auth_data[8..16].copy_from_slice(&rnd_ic);
     ext_auth_data[16..32].copy_from_slice(&k_ifd);
 
-    // encrypt using 3DES (EDE 2-key) in CBC mode with an all-zeroes IV and no padding
+    // encrypt with an all-zeroes IV and no padding
     let iv = [0u8; 8];
-    let encryptor: cbc::Encryptor<TdesEde2> = cbc::Encryptor::new(k_enc.as_slice().try_into().unwrap(), &iv.into());
-    encryptor.encrypt_padded::<NoPadding>(&mut ext_auth_data[0..32], 32).unwrap();
+    debug_assert_eq!(32 % Smo3Des.cipher_block_size(), 0);
+    Smo3Des.encrypt_padded_data(&mut ext_auth_data[0..32], &k_enc, &iv);
     // ext_auth_data[0..32] is now encrypted
 
-    // pad according to ISO 7816, then generate Retail MAC
+    // pad according to ISO 7816, then generate MAC
     Iso7816::raw_pad(&mut ext_auth_data, 32);
-    let mut retail_mac = RetailMacDes::new_from_slice(&k_mac).unwrap();
-    DynDigest::update(&mut retail_mac, &ext_auth_data);
+    let mac = Smo3Des.mac_padded_data(&k_mac, &k_mac);
     // MAC fits right where the padding was
-    retail_mac.finalize_into(&mut ext_auth_data[32..32+8]).unwrap();
+    ext_auth_data[32..32+8].copy_from_slice(mac.as_slice());
 
     // send EXTERNAL AUTHENTICATE
     let ext_auth_request = Apdu {
@@ -100,7 +95,7 @@ pub fn establish_from_values<'c, SC: SmartCard>(
     if ext_auth_response.data.len() != 40 {
         return Err(Error::LengthMismatch {
             operation: Operation::ExternalAuthenticate,
-            obtained: ext_auth_response.data,
+            obtained: ext_auth_response.data.clone(),
             expected_length: 40,
         }.into());
     }
@@ -109,16 +104,14 @@ pub fn establish_from_values<'c, SC: SmartCard>(
     let mut response_data_to_verify = [0u8; 32+8];
     response_data_to_verify[0..32].copy_from_slice(&ext_auth_response.data[0..32]);
     Iso7816::raw_pad(&mut response_data_to_verify, 32);
-    let mut response_mac = RetailMacDes::new_from_slice(&k_mac).unwrap();
-    DynDigest::update(&mut response_mac, &response_data_to_verify);
-    if let Err(_) = response_mac.verify_slice(&ext_auth_response.data[32..32+8]) {
+    if !Smo3Des.verify_mac_padded_data(&response_data_to_verify, &k_mac, &ext_auth_response.data[32..32+8]) {
         return Err(Error::ResponseMac.into());
     }
 
     // decrypt
     let iv = [0u8; 8];
-    let decryptor: cbc::Decryptor<TdesEde2> = cbc::Decryptor::new(&k_enc.as_slice().try_into().unwrap(), &iv.into());
-    let decrypted_slice = decryptor.decrypt_padded::<NoPadding>(&mut ext_auth_response.data[0..32]).unwrap();
+    Smo3Des.decrypt_padded_data(&mut ext_auth_response.data[0..32], &k_enc, &iv);
+    let decrypted_slice = &ext_auth_response.data[0..32];
 
     let mut rnd_ic_second = [0u8; 8];
     let mut rnd_ifd_second = [0u8; 8];
@@ -139,8 +132,8 @@ pub fn establish_from_values<'c, SC: SmartCard>(
         *kss = *kifd ^ *kic;
     }
 
-    let k_session_enc = Kdf3Des::derive_encryption_key(&k_session_seed);
-    let k_session_mac = Kdf3Des::derive_mac_key(&k_session_seed);
+    let k_session_enc = Smo3Des.derive_encryption_key(&k_session_seed);
+    let k_session_mac = Smo3Des.derive_mac_key(&k_session_seed);
 
     let mut send_sequence_counter = [0u8; 8];
     send_sequence_counter[0..4].copy_from_slice(&rnd_ic[4..8]);

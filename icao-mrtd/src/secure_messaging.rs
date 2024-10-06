@@ -116,34 +116,58 @@ struct BorrowedTlv<'d> {
 }
 
 
-/// Operations for Secure Messaging key derivation.
-pub trait KeyDerivation {
+/// Operations for Secure Messaging cryptography operations.
+pub trait SecureMessagingOperations {
     /// Size of the cipher key in bytes.
-    fn cipher_key_size() -> usize;
+    fn cipher_key_size(&self) -> usize;
+
+    /// Block size of the cipher in bytes.
+    fn cipher_block_size(&self) -> usize;
+
+    /// Block size of the MAC in bytes.
+    fn mac_block_size(&self) -> usize;
 
     /// The key derivation function.
-    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>>;
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>>;
 
     /// The key derivation function for encryption purposes.
-    fn derive_encryption_key(key_seed: &[u8]) -> Zeroizing<Vec<u8>> {
-        Self::derive_key(key_seed, 1)
+    fn derive_encryption_key(&self, key_seed: &[u8]) -> Zeroizing<Vec<u8>> {
+        self.derive_key(key_seed, 1)
     }
 
     /// The key derivation function for message authentication purposes.
-    fn derive_mac_key(key_seed: &[u8]) -> Zeroizing<Vec<u8>> {
-        Self::derive_key(key_seed, 2)
+    fn derive_mac_key(&self, key_seed: &[u8]) -> Zeroizing<Vec<u8>> {
+        self.derive_key(key_seed, 2)
     }
 
     /// The password-to-key derivation function.
-    fn derive_key_from_password(password: &[u8]) -> Zeroizing<Vec<u8>> {
-        Self::derive_key(password, 3)
+    fn derive_key_from_password(&self, password: &[u8]) -> Zeroizing<Vec<u8>> {
+        self.derive_key(password, 3)
+    }
+
+    /// Decrypts data in-place using the given key and CBC IV.
+    ///
+    /// Does not strip padding.
+    fn decrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]);
+
+    /// Encrypts pre-padded data in-place using the given key and CBC IV.
+    fn encrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]);
+
+    /// Generates a MAC (message authentication code) for the given pre-padded data and key.
+    fn mac_padded_data(&self, data: &[u8], key: &[u8]) -> Zeroizing<Vec<u8>>;
+
+    /// Verifies whether the given data fits the given MAC (message authentication code).
+    fn verify_mac_padded_data(&self, data: &[u8], key: &[u8], expected_mac: &[u8]) -> bool {
+        let computed_mac = self.mac_padded_data(data, key);
+        computed_mac.ct_eq(expected_mac).into()
     }
 }
 
 
-/// Key derivation for secure messaging using 3DES.
+/// Cryptographic operations for secure messaging using 3DES.
 ///
-/// 3DES is used in EDE two-key mode, i.e. `K3 = K1`.
+/// 3DES is used in EDE two-key mode, i.e. `K3 = K1`. The block mode of operation is Cipher Block
+/// Chaining (CBC).
 ///
 /// The KDF is equivalent to:
 /// ```plain
@@ -154,80 +178,187 @@ pub trait KeyDerivation {
 /// K1 = keydata[0..8]
 /// K2 = keydata[8..16]
 /// ```
-pub struct Kdf3Des;
-impl KeyDerivation for Kdf3Des {
-    fn cipher_key_size() -> usize { 16 }
+///
+/// The MAC is Retail MAC (ISO/IEC 9797-1 algorithm 3) with DES, zero IV and padding method 2 (bit 1
+/// and then as many zero bits as necessary).
+pub struct Smo3Des;
+impl SecureMessagingOperations for Smo3Des {
+    fn cipher_key_size(&self) -> usize { 16 }
+    fn cipher_block_size(&self) -> usize { 8 }
+    fn mac_block_size(&self) -> usize { 8 }
 
-    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
         let mut hasher = Sha1::new();
         DynDigest::update(&mut hasher, key_seed);
         DynDigest::update(&mut hasher, &counter.to_be_bytes());
         let result = hasher.finalize();
 
-        Zeroizing::new(result[0..Self::cipher_key_size()].to_vec())
+        Zeroizing::new(result[0..self.cipher_key_size()].to_vec())
+    }
+
+    fn decrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]) {
+        let decryptor: cbc::Decryptor<TdesEde2> = cbc::Decryptor::new(key.try_into().unwrap(), iv.try_into().unwrap());
+        decryptor.decrypt_padded::<NoPadding>(data).unwrap();
+    }
+
+    fn encrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]) {
+        let decryptor: cbc::Encryptor<TdesEde2> = cbc::Encryptor::new(key.try_into().unwrap(), iv.try_into().unwrap());
+        decryptor.encrypt_padded::<NoPadding>(data, data.len()).unwrap();
+    }
+
+    fn mac_padded_data(&self, data: &[u8], key: &[u8]) -> Zeroizing<Vec<u8>> {
+        let mut retail_mac = RetailMacDes::new_from_slice(key).unwrap();
+        DynDigest::update(&mut retail_mac, data);
+        let mut mac = vec![0u8; 8];
+        retail_mac.finalize_into(&mut mac).unwrap();
+        Zeroizing::new(mac)
+    }
+
+    fn verify_mac_padded_data(&self, data: &[u8], key: &[u8], expected_mac: &[u8]) -> bool {
+        let mut retail_mac = RetailMacDes::new_from_slice(key).unwrap();
+        DynDigest::update(&mut retail_mac, data);
+        retail_mac.verify_slice(expected_mac).is_ok()
     }
 }
 
 
-/// Key derivation for secure messaging using AES-128.
+/// Cryptographic operations for secure messaging using AES-128.
+///
+/// The block mode of operation is Cipher Block Chaining (CBC).
 ///
 /// The KDF is equivalent to:
 /// ```plain
 /// keydata = sha1(key || counter)[0..16]
 /// ```
-pub struct KdfAes128;
-impl KeyDerivation for KdfAes128 {
-    fn cipher_key_size() -> usize { 16 }
+///
+/// The MAC is CMAC with AES-128 truncated to the initial 8 bytes.
+pub struct SmoAes128;
+impl SecureMessagingOperations for SmoAes128 {
+    fn cipher_key_size(&self) -> usize { 16 }
+    fn cipher_block_size(&self) -> usize { 16 }
+    fn mac_block_size(&self) -> usize { 1 }
 
-    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
         let mut hasher = Sha1::new();
         DynDigest::update(&mut hasher, key_seed);
         DynDigest::update(&mut hasher, &counter.to_be_bytes());
         let result = hasher.finalize();
 
-        Zeroizing::new(result[0..Self::cipher_key_size()].to_vec())
+        Zeroizing::new(result[0..self.cipher_key_size()].to_vec())
+    }
+
+    fn decrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]) {
+        let decryptor: cbc::Decryptor<Aes128> = cbc::Decryptor::new(key.try_into().unwrap(), iv.try_into().unwrap());
+        decryptor.decrypt_padded::<NoPadding>(data).unwrap();
+    }
+
+    fn encrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]) {
+        let decryptor: cbc::Encryptor<Aes128> = cbc::Encryptor::new(key.try_into().unwrap(), iv.try_into().unwrap());
+        decryptor.encrypt_padded::<NoPadding>(data, data.len()).unwrap();
+    }
+
+    fn mac_padded_data(&self, data: &[u8], key: &[u8]) -> Zeroizing<Vec<u8>> {
+        let mut mac = Cmac::<Aes128>::new_from_slice(key).unwrap();
+        DynDigest::update(&mut mac, data);
+        let mut final_mac = vec![0u8; 16];
+        mac.finalize_into(final_mac.as_mut_slice()).unwrap();
+        final_mac[8..].fill(0);
+        final_mac.truncate(8);
+        Zeroizing::new(final_mac)
     }
 }
 
 
-/// Key derivation for secure messaging using AES-192.
+/// Cryptographic operations for secure messaging using AES-192.
+///
+/// The block mode of operation is Cipher Block Chaining (CBC).
 ///
 /// The KDF is equivalent to:
 /// ```plain
 /// keydata = sha256(key || counter)[0..24]
 /// ```
-pub struct KdfAes192;
-impl KeyDerivation for KdfAes192 {
-    fn cipher_key_size() -> usize { 24 }
+///
+/// The MAC is CMAC with AES-192 truncated to the initial 8 bytes.
+pub struct SmoAes192;
+impl SecureMessagingOperations for SmoAes192 {
+    fn cipher_key_size(&self) -> usize { 24 }
+    fn cipher_block_size(&self) -> usize { 16 }
+    fn mac_block_size(&self) -> usize { 1 }
 
-    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
         let mut hasher = Sha256::new();
         DynDigest::update(&mut hasher, key_seed);
         DynDigest::update(&mut hasher, &counter.to_be_bytes());
         let result = hasher.finalize();
 
-        Zeroizing::new(result[0..Self::cipher_key_size()].to_vec())
+        Zeroizing::new(result[0..self.cipher_key_size()].to_vec())
+    }
+
+    fn decrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]) {
+        let decryptor: cbc::Decryptor<Aes192> = cbc::Decryptor::new(key.try_into().unwrap(), iv.try_into().unwrap());
+        decryptor.decrypt_padded::<NoPadding>(data).unwrap();
+    }
+
+    fn encrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]) {
+        let decryptor: cbc::Encryptor<Aes192> = cbc::Encryptor::new(key.try_into().unwrap(), iv.try_into().unwrap());
+        decryptor.encrypt_padded::<NoPadding>(data, data.len()).unwrap();
+    }
+
+    fn mac_padded_data(&self, data: &[u8], key: &[u8]) -> Zeroizing<Vec<u8>> {
+        let mut mac = Cmac::<Aes192>::new_from_slice(key).unwrap();
+        DynDigest::update(&mut mac, data);
+        let mut final_mac = vec![0u8; 16];
+        mac.finalize_into(final_mac.as_mut_slice()).unwrap();
+        final_mac[8..].fill(0);
+        final_mac.truncate(8);
+        Zeroizing::new(final_mac)
     }
 }
 
 
-/// Key derivation for secure messaging using AES-256.
+/// Cryptographic operations for secure messaging using AES-256.
+///
+/// The block mode of operation is Cipher Block Chaining (CBC).
 ///
 /// The KDF is equivalent to:
 /// ```plain
 /// keydata = sha256(key || counter)
 /// ```
-pub struct KdfAes256;
-impl KeyDerivation for KdfAes256 {
-    fn cipher_key_size() -> usize { 32 }
+///
+/// The MAC is CMAC with AES-256 truncated to the initial 8 bytes.
+pub struct SmoAes256;
+impl SecureMessagingOperations for SmoAes256 {
+    fn cipher_key_size(&self) -> usize { 32 }
+    fn cipher_block_size(&self) -> usize { 8 }
+    fn mac_block_size(&self) -> usize { 1 }
 
-    fn derive_key(key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
+    fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
         let mut hasher = Sha256::new();
         DynDigest::update(&mut hasher, key_seed);
         DynDigest::update(&mut hasher, &counter.to_be_bytes());
         let result = hasher.finalize();
 
-        Zeroizing::new(result[0..Self::cipher_key_size()].to_vec())
+        Zeroizing::new(result[0..self.cipher_key_size()].to_vec())
+    }
+
+    fn decrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]) {
+        let decryptor: cbc::Decryptor<Aes256> = cbc::Decryptor::new(key.try_into().unwrap(), iv.try_into().unwrap());
+        decryptor.decrypt_padded::<NoPadding>(data).unwrap();
+    }
+
+    fn encrypt_padded_data(&self, data: &mut [u8], key: &[u8], iv: &[u8]) {
+        let decryptor: cbc::Encryptor<Aes256> = cbc::Encryptor::new(key.try_into().unwrap(), iv.try_into().unwrap());
+        decryptor.encrypt_padded::<NoPadding>(data, data.len()).unwrap();
+    }
+
+    fn mac_padded_data(&self, data: &[u8], key: &[u8]) -> Zeroizing<Vec<u8>> {
+        let mut mac = Cmac::<Aes256>::new_from_slice(key).unwrap();
+        DynDigest::update(&mut mac, data);
+        let mut final_mac = vec![0u8; 16];
+        mac.finalize_into(final_mac.as_mut_slice()).unwrap();
+        final_mac[8..].fill(0);
+        final_mac.truncate(8);
+        Zeroizing::new(final_mac)
     }
 }
 
@@ -296,7 +427,7 @@ pub trait SecureMessaging<SC: SmartCard> {
     /// Generate a MAC with the MAC key for data that has already been pre-padded.
     ///
     /// Allowed to panic if the data has not, in fact, been pre-padded.
-    fn mac_padded_data<'d>(&self, data: &[u8]) -> Vec<u8>;
+    fn mac_padded_data<'d>(&self, data: &[u8]) -> Zeroizing<Vec<u8>>;
 
     /// Verify that the MAC calculated for the given pre-padded data matches the given MAC.
     ///
@@ -315,13 +446,13 @@ pub trait SecureMessaging<SC: SmartCard> {
         my_request.header.cla |= 0b000_0_11_00;
 
         // collect the padded header
-        let mut padded_header = vec![
+        let mut padded_header = Zeroizing::new(vec![
             my_request.header.cla,
             my_request.header.ins,
             my_request.header.p1,
             my_request.header.p2,
             0x80,
-        ];
+        ]);
         while padded_header.len() % mac_block_size != 0 {
             padded_header.push(0x00);
         }
@@ -330,15 +461,15 @@ pub trait SecureMessaging<SC: SmartCard> {
         let send_sequence_counter = self.increment_send_sequence_counter();
 
         // to compute the MAC, concatenate SSC, padded new header, and data
-        let mut mac_data = Vec::new();
+        let mut mac_data = Zeroizing::new(Vec::new());
         mac_data.extend(send_sequence_counter);
-        mac_data.extend(&padded_header);
+        mac_data.extend(padded_header.as_slice());
 
-        let mut body_data = Vec::new();
+        let mut body_data = Zeroizing::new(Vec::new());
 
         if let Some(request_data) = request.data.request_data() {
             // collect the padded data
-            let mut padded_data = request_data.to_vec();
+            let mut padded_data = Zeroizing::new(request_data.to_vec());
             // append padding
             padded_data.push(0x80);
             while padded_data.len() % cipher_block_size != 0 {
@@ -352,13 +483,13 @@ pub trait SecureMessaging<SC: SmartCard> {
             // 0x87 len padtype data...
             // padtype is 0x01 for ISO 7816 padding
             // 0x87 = 0b10_0_00111 (Context-Specific, Primitive, 7)
-            let mut data_object_87 = Vec::with_capacity(1 + 1 + 1 + padded_data.len());
+            let mut data_object_87 = Zeroizing::new(Vec::with_capacity(1 + 1 + 1 + padded_data.len()));
             data_object_87.push(0x87);
             crate::der_util::encode_primitive_length(&mut data_object_87, 1 + padded_data.len());
             data_object_87.push(0x01); // ISO 7816 padding
-            data_object_87.extend(padded_data);
+            data_object_87.extend(padded_data.as_slice());
 
-            body_data.extend(&data_object_87);
+            body_data.extend(data_object_87.as_slice());
         }
 
         // are we expecting something in return?
@@ -368,19 +499,19 @@ pub trait SecureMessaging<SC: SmartCard> {
             },
             Data::ResponseDataShort { response_data_length }|Data::BothDataShort { response_data_length, .. } => {
                 // yes; append single-byte data object 97
-                let data_object_97 = [0x97, 0x01, *response_data_length];
-                body_data.extend(&data_object_97);
+                let data_object_97 = Zeroizing::new([0x97, 0x01, *response_data_length]);
+                body_data.extend(data_object_97.as_slice());
             },
             Data::ResponseDataExtended { response_data_length }|Data::BothDataExtended { response_data_length, .. } => {
                 // yes; append two-byte data object 97
-                let mut data_object_97: [u8; 4] = [0x97, 0x02, 0x00, 0x00];
+                let mut data_object_97: Zeroizing<[u8; 4]> = Zeroizing::new([0x97, 0x02, 0x00, 0x00]);
                 data_object_97[2..4].copy_from_slice(&response_data_length.to_be_bytes());
-                body_data.extend(&data_object_97);
+                body_data.extend(data_object_97.as_slice());
             },
         }
 
         // compute the MAC
-        mac_data.extend(&body_data);
+        mac_data.extend(body_data.as_slice());
         // add padding
         mac_data.push(0x80);
         while mac_data.len() % mac_block_size != 0 {
@@ -390,23 +521,23 @@ pub trait SecureMessaging<SC: SmartCard> {
         let mac = self.mac_padded_data(&mac_data);
 
         // build data object 8E
-        let mut data_object_8e = Vec::with_capacity(1 + 1 + 8);
+        let mut data_object_8e = Zeroizing::new(Vec::with_capacity(1 + 1 + 8));
         data_object_8e.push(0x8E);
         crate::der_util::encode_primitive_length(&mut data_object_8e, mac.len());
-        data_object_8e.extend(&mac);
+        data_object_8e.extend(mac.as_slice());
 
         // append 8E (MAC) to body
-        body_data.extend(&data_object_8e);
+        body_data.extend(data_object_8e.as_slice());
 
         // update data in APDU
         if body_data.len() > 256 {
             my_request.data = Data::BothDataExtended {
-                request_data: body_data,
+                request_data: body_data.to_vec(),
                 response_data_length: 0,
             };
         } else {
             my_request.data = Data::BothDataShort {
-                request_data: body_data,
+                request_data: body_data.to_vec(),
                 response_data_length: 0,
             };
         }
@@ -460,7 +591,7 @@ pub trait SecureMessaging<SC: SmartCard> {
         let ssc_for_received = self.increment_send_sequence_counter();
 
         // verify MAC
-        let mut data = Vec::new();
+        let mut data = Zeroizing::new(Vec::new());
         data.extend(ssc_for_received);
         for field in &received_mac_fields {
             data.extend(field.tag_and_length);
@@ -489,7 +620,7 @@ pub trait SecureMessaging<SC: SmartCard> {
                 // not ISO 7816 padding
                 return Err(Error::UnknownPadding { padding_mode: actual_response.data[0] }.into());
             }
-            let mut encrypted_data = actual_response.data[1..].to_vec();
+            let mut encrypted_data = Zeroizing::new(actual_response.data[1..].to_vec());
 
             self.decrypt_padded_data(encrypted_data.as_mut_slice());
 
@@ -504,7 +635,7 @@ pub trait SecureMessaging<SC: SmartCard> {
 
             println!("decrypted data:");
             crate::hexdump(&encrypted_data);
-            encrypted_data
+            encrypted_data.to_vec()
         };
         let actual_status = received_mac_fields.iter()
             .filter(|tlv| tlv.tag_and_length[0] == 0x99)
@@ -523,7 +654,7 @@ pub trait SecureMessaging<SC: SmartCard> {
 
 /// Secure messaging using 3DES.
 ///
-/// 3DES is used in EDE two-key mode, i.e. `K3 = K1`. Keys are derived using [`Kdf3Des`].
+/// 3DES is used in EDE two-key mode, i.e. `K3 = K1`. Secure operations are provided by [`Smo3Des`].
 #[derive(ZeroizeOnDrop)]
 pub struct Sm3Des<'sc, SC: SmartCard> {
     #[zeroize(skip)] card: &'sc mut SC,
@@ -547,42 +678,34 @@ impl<'sc, SC: SmartCard> Sm3Des<'sc, SC> {
     }
 }
 impl<'sc, SC: SmartCard> SecureMessaging<SC> for Sm3Des<'sc, SC> {
-    fn cipher_key_size(&self) -> usize { Kdf3Des::cipher_key_size() }
-    fn cipher_block_size(&self) -> usize { 8 }
-    fn mac_block_size(&self) -> usize { 8 }
+    fn cipher_key_size(&self) -> usize { Smo3Des.cipher_key_size() }
+    fn cipher_block_size(&self) -> usize { Smo3Des.cipher_block_size() }
+    fn mac_block_size(&self) -> usize { Smo3Des.mac_block_size() }
 
     fn get_smart_card_mut(&mut self) -> &mut SC { &mut self.card }
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8] { &mut self.send_sequence_counter }
 
     fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
-        Kdf3Des::derive_key(key_seed, counter)
+        Smo3Des.derive_key(key_seed, counter)
     }
 
     fn decrypt_padded_data(&self, data: &mut [u8]) {
         let iv = [0u8; 8];
-        let decryptor: cbc::Decryptor<TdesEde2> = cbc::Decryptor::new(&self.k_session_enc.into(), &iv.into());
-        decryptor.decrypt_padded::<NoPadding>(data).unwrap();
+        Smo3Des.decrypt_padded_data(data, &self.k_session_enc, &iv)
     }
 
     fn encrypt_padded_data(&self, data: &mut [u8]) {
         // (IV is always zero, see Doc 9303 Part 11 § 9.8.6.1)
         let iv = [0u8; 8];
-        let encryptor: cbc::Encryptor<TdesEde2> = cbc::Encryptor::new(&self.k_session_enc.into(), &iv.into());
-        encryptor.encrypt_padded::<NoPadding>(data, data.len()).unwrap();
+        Smo3Des.encrypt_padded_data(data, &self.k_session_enc, &iv)
     }
 
-    fn mac_padded_data<'d>(&self, data: &[u8]) -> Vec<u8> {
-        let mut retail_mac = RetailMacDes::new_from_slice(&self.k_session_mac).unwrap();
-        DynDigest::update(&mut retail_mac, data);
-        let mut mac = vec![0u8; 8];
-        retail_mac.finalize_into(&mut mac).unwrap();
-        mac
+    fn mac_padded_data<'d>(&self, data: &[u8]) -> Zeroizing<Vec<u8>> {
+        Smo3Des.mac_padded_data(data, &self.k_session_mac)
     }
 
     fn verify_mac_padded_data<'d>(&self, data: &[u8], expected_mac: &[u8]) -> bool {
-        let mut retail_mac = RetailMacDes::new_from_slice(&self.k_session_mac).unwrap();
-        DynDigest::update(&mut retail_mac, data);
-        retail_mac.verify_slice(expected_mac).is_ok()
+        Smo3Des.verify_mac_padded_data(data, &self.k_session_mac, expected_mac)
     }
 }
 impl<'sc, SC: SmartCard> SmartCard for Sm3Des<'sc, SC> {
@@ -594,7 +717,7 @@ impl<'sc, SC: SmartCard> SmartCard for Sm3Des<'sc, SC> {
 
 /// Secure messaging using AES-128.
 ///
-/// Keys are derived using [`KdfAes128`].
+/// Secure operations are provided by [`SmoAes128`].
 #[derive(ZeroizeOnDrop)]
 pub struct SmAes128<'sc, SC: SmartCard> {
     #[zeroize(skip)] card: &'sc mut SC,
@@ -603,46 +726,51 @@ pub struct SmAes128<'sc, SC: SmartCard> {
     send_sequence_counter: [u8; 16],
 }
 impl<'sc, SC: SmartCard> SmAes128<'sc, SC> {
+    pub fn new(
+        card: &'sc mut SC,
+        k_session_enc: [u8; 16],
+        k_session_mac: [u8; 16],
+        send_sequence_counter: [u8; 16],
+    ) -> Self {
+        Self {
+            card,
+            k_session_enc,
+            k_session_mac,
+            send_sequence_counter,
+        }
+    }
+
     fn derive_iv(&self) -> [u8; 16] {
-        let encryptor = Aes128::new_from_slice(&self.k_session_enc).unwrap();
-        let mut iv = self.send_sequence_counter.clone();
-        let iv_len = iv.len();
-        encryptor.encrypt_padded::<NoPadding>(&mut iv, iv_len).unwrap();
-        iv
+        let derivation_iv = [0u8; 16];
+        let mut actual_iv = self.send_sequence_counter.clone();
+        SmoAes128.encrypt_padded_data(&mut actual_iv, &self.k_session_enc, &derivation_iv);
+        actual_iv
     }
 }
 impl<'sc, SC: SmartCard> SecureMessaging<SC> for SmAes128<'sc, SC> {
-    fn cipher_key_size(&self) -> usize { KdfAes128::cipher_key_size() }
-    fn cipher_block_size(&self) -> usize { 16 }
-    fn mac_block_size(&self) -> usize { 1 }
+    fn cipher_key_size(&self) -> usize { SmoAes128.cipher_key_size() }
+    fn cipher_block_size(&self) -> usize { SmoAes128.cipher_block_size() }
+    fn mac_block_size(&self) -> usize { SmoAes128.mac_block_size() }
 
     fn get_smart_card_mut(&mut self) -> &mut SC { &mut self.card }
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8] { &mut self.send_sequence_counter }
 
     fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
-        KdfAes128::derive_key(key_seed, counter)
+        SmoAes128.derive_key(key_seed, counter)
     }
 
     fn decrypt_padded_data(&self, data: &mut [u8]) {
         let iv = self.derive_iv();
-        let decryptor: cbc::Decryptor<Aes128> = cbc::Decryptor::new(&self.k_session_enc.into(), &iv.into());
-        decryptor.decrypt_padded::<NoPadding>(data).unwrap();
+        SmoAes128.decrypt_padded_data(data, &self.k_session_enc, &iv)
     }
 
     fn encrypt_padded_data(&self, data: &mut [u8]) {
         let iv = self.derive_iv();
-        let encryptor: cbc::Encryptor<Aes128> = cbc::Encryptor::new(&self.k_session_enc.into(), &iv.into());
-        let data_len = data.len();
-        encryptor.encrypt_padded::<NoPadding>(data, data_len).unwrap();
+        SmoAes128.encrypt_padded_data(data, &self.k_session_enc, &iv)
     }
 
-    fn mac_padded_data<'d>(&self, data: &[u8]) -> Vec<u8> {
-        let mut mac = Cmac::<Aes128>::new_from_slice(&self.k_session_mac).unwrap();
-        DynDigest::update(&mut mac, data);
-        let mut final_mac = vec![0u8; 16];
-        mac.finalize_into(final_mac.as_mut_slice()).unwrap();
-        final_mac.truncate(8);
-        final_mac
+    fn mac_padded_data<'d>(&self, data: &[u8]) -> Zeroizing<Vec<u8>> {
+        SmoAes128.mac_padded_data(data, &self.k_session_mac)
     }
 }
 impl<'sc, SC: SmartCard> SmartCard for SmAes128<'sc, SC> {
@@ -654,7 +782,7 @@ impl<'sc, SC: SmartCard> SmartCard for SmAes128<'sc, SC> {
 
 /// Secure messaging using AES-192.
 ///
-/// Keys are derived using [`KdfAes192`].
+/// Secure operations are provided by [`SmoAes192`].
 #[derive(ZeroizeOnDrop)]
 pub struct SmAes192<'sc, SC: SmartCard> {
     #[zeroize(skip)] card: &'sc mut SC,
@@ -663,46 +791,51 @@ pub struct SmAes192<'sc, SC: SmartCard> {
     send_sequence_counter: [u8; 16],
 }
 impl<'sc, SC: SmartCard> SmAes192<'sc, SC> {
+    pub fn new(
+        card: &'sc mut SC,
+        k_session_enc: [u8; 24],
+        k_session_mac: [u8; 24],
+        send_sequence_counter: [u8; 16],
+    ) -> Self {
+        Self {
+            card,
+            k_session_enc,
+            k_session_mac,
+            send_sequence_counter,
+        }
+    }
+
     fn derive_iv(&self) -> [u8; 16] {
-        let encryptor = Aes192::new_from_slice(&self.k_session_enc).unwrap();
-        let mut iv = self.send_sequence_counter.clone();
-        let iv_len = iv.len();
-        encryptor.encrypt_padded::<NoPadding>(&mut iv, iv_len).unwrap();
-        iv
+        let derivation_iv = [0u8; 16];
+        let mut actual_iv = self.send_sequence_counter.clone();
+        SmoAes192.encrypt_padded_data(&mut actual_iv, &self.k_session_enc, &derivation_iv);
+        actual_iv
     }
 }
 impl<'sc, SC: SmartCard> SecureMessaging<SC> for SmAes192<'sc, SC> {
-    fn cipher_key_size(&self) -> usize { KdfAes192::cipher_key_size() }
-    fn cipher_block_size(&self) -> usize { 16 }
-    fn mac_block_size(&self) -> usize { 1 }
+    fn cipher_key_size(&self) -> usize { SmoAes192.cipher_key_size() }
+    fn cipher_block_size(&self) -> usize { SmoAes192.cipher_block_size() }
+    fn mac_block_size(&self) -> usize { SmoAes192.mac_block_size() }
 
     fn get_smart_card_mut(&mut self) -> &mut SC { &mut self.card }
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8] { &mut self.send_sequence_counter }
 
     fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
-        KdfAes192::derive_key(key_seed, counter)
+        SmoAes192.derive_key(key_seed, counter)
     }
 
     fn decrypt_padded_data(&self, data: &mut [u8]) {
         let iv = self.derive_iv();
-        let decryptor: cbc::Decryptor<Aes192> = cbc::Decryptor::new(&self.k_session_enc.into(), &iv.into());
-        decryptor.decrypt_padded::<NoPadding>(data).unwrap();
+        SmoAes192.decrypt_padded_data(data, &self.k_session_enc, &iv)
     }
 
     fn encrypt_padded_data(&self, data: &mut [u8]) {
         let iv = self.derive_iv();
-        let encryptor: cbc::Encryptor<Aes192> = cbc::Encryptor::new(&self.k_session_enc.into(), &iv.into());
-        let data_len = data.len();
-        encryptor.encrypt_padded::<NoPadding>(data, data_len).unwrap();
+        SmoAes192.encrypt_padded_data(data, &self.k_session_enc, &iv)
     }
 
-    fn mac_padded_data<'d>(&self, data: &[u8]) -> Vec<u8> {
-        let mut mac = Cmac::<Aes192>::new_from_slice(&self.k_session_mac).unwrap();
-        DynDigest::update(&mut mac, data);
-        let mut final_mac = vec![0u8; 16];
-        mac.finalize_into(final_mac.as_mut_slice()).unwrap();
-        final_mac.truncate(8);
-        final_mac
+    fn mac_padded_data<'d>(&self, data: &[u8]) -> Zeroizing<Vec<u8>> {
+        SmoAes192.mac_padded_data(data, &self.k_session_mac)
     }
 }
 impl<'sc, SC: SmartCard> SmartCard for SmAes192<'sc, SC> {
@@ -714,7 +847,7 @@ impl<'sc, SC: SmartCard> SmartCard for SmAes192<'sc, SC> {
 
 /// Key derivation function for AES-256.
 ///
-/// Keys are derived using [`KdfAes256`].
+/// Secure operations are provided by [`SmoAes256`].
 #[derive(ZeroizeOnDrop)]
 pub struct SmAes256<'sc, SC: SmartCard> {
     #[zeroize(skip)] card: &'sc mut SC,
@@ -723,6 +856,20 @@ pub struct SmAes256<'sc, SC: SmartCard> {
     send_sequence_counter: [u8; 16],
 }
 impl<'sc, SC: SmartCard> SmAes256<'sc, SC> {
+    pub fn new(
+        card: &'sc mut SC,
+        k_session_enc: [u8; 32],
+        k_session_mac: [u8; 32],
+        send_sequence_counter: [u8; 16],
+    ) -> Self {
+        Self {
+            card,
+            k_session_enc,
+            k_session_mac,
+            send_sequence_counter,
+        }
+    }
+
     fn derive_iv(&self) -> [u8; 16] {
         let encryptor = Aes256::new_from_slice(&self.k_session_enc).unwrap();
         let mut iv = self.send_sequence_counter.clone();
@@ -732,37 +879,29 @@ impl<'sc, SC: SmartCard> SmAes256<'sc, SC> {
     }
 }
 impl<'sc, SC: SmartCard> SecureMessaging<SC> for SmAes256<'sc, SC> {
-    fn cipher_key_size(&self) -> usize { KdfAes256::cipher_key_size() }
-    fn cipher_block_size(&self) -> usize { 8 }
-    fn mac_block_size(&self) -> usize { 1 }
+    fn cipher_key_size(&self) -> usize { SmoAes256.cipher_key_size() }
+    fn cipher_block_size(&self) -> usize { SmoAes256.cipher_block_size() }
+    fn mac_block_size(&self) -> usize { SmoAes256.mac_block_size() }
 
     fn get_smart_card_mut(&mut self) -> &mut SC { &mut self.card }
     fn get_send_sequence_counter_mut(&mut self) -> &mut [u8] { &mut self.send_sequence_counter }
 
     fn derive_key(&self, key_seed: &[u8], counter: u32) -> Zeroizing<Vec<u8>> {
-        KdfAes256::derive_key(key_seed, counter)
+        SmoAes256.derive_key(key_seed, counter)
     }
 
     fn decrypt_padded_data(&self, data: &mut [u8]) {
         let iv = self.derive_iv();
-        let decryptor: cbc::Decryptor<Aes256> = cbc::Decryptor::new(&self.k_session_enc.into(), &iv.into());
-        decryptor.decrypt_padded::<NoPadding>(data).unwrap();
+        SmoAes256.decrypt_padded_data(data, &self.k_session_enc, &iv)
     }
 
     fn encrypt_padded_data(&self, data: &mut [u8]) {
         let iv = self.derive_iv();
-        let encryptor: cbc::Encryptor<Aes256> = cbc::Encryptor::new(&self.k_session_enc.into(), &iv.into());
-        let data_len = data.len();
-        encryptor.encrypt_padded::<NoPadding>(data, data_len).unwrap();
+        SmoAes256.encrypt_padded_data(data, &self.k_session_enc, &iv)
     }
 
-    fn mac_padded_data<'d>(&self, data: &[u8]) -> Vec<u8> {
-        let mut mac = Cmac::<Aes256>::new_from_slice(&self.k_session_mac).unwrap();
-        DynDigest::update(&mut mac, data);
-        let mut final_mac = vec![0u8; 16];
-        mac.finalize_into(final_mac.as_mut_slice()).unwrap();
-        final_mac.truncate(8);
-        final_mac
+    fn mac_padded_data<'d>(&self, data: &[u8]) -> Zeroizing<Vec<u8>> {
+        SmoAes256.mac_padded_data(data, &self.k_session_mac)
     }
 }
 impl<'sc, SC: SmartCard> SmartCard for SmAes256<'sc, SC> {

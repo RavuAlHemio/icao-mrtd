@@ -7,16 +7,26 @@ mod crypt;
 
 use std::fmt;
 
-use cipher::BlockModeDecrypt;
+use crypt::elliptic::AffinePoint;
+use digest::Digest;
+use rand::RngCore;
+use rand::rngs::OsRng;
 use rasn::types::{Any, ObjectIdentifier, Oid, SetOf};
+use sha1::Sha1;
+use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
-use crate::der_util;
+use crate::der_util::{self, encode_primitive_length, oid_to_der_bytes, try_decode_primitive_length};
 use crate::iso7816::apdu::{Apdu, CommandHeader, Data, Response};
 use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::pace::asn1::PaceInfo;
-use crate::pace::crypt::dh::DiffieHellmanParams;
+use crate::pace::crypt::boxed_uint_from_be_slice;
+use crate::pace::crypt::dh::{DiffieHellman, DiffieHellmanParams};
 use crate::pace::crypt::elliptic::PrimeWeierstrassCurve;
-use crate::secure_messaging::SecureMessaging;
+use crate::secure_messaging::{
+    SecureMessaging, SecureMessagingOperations, Sm3Des, SmAes128, SmAes192, SmAes256, Smo3Des,
+    SmoAes128, SmoAes192, SmoAes256,
+};
 
 
 macro_rules! pace_oids {
@@ -71,6 +81,9 @@ pub const PACE_PROTOCOL_OIDS: [&'static Oid; 19] = [
 pub enum Operation {
     SetAuthenticationTemplate,
     ObtainNonce,
+    ExchangeMappingPublicKeys,
+    ExchangeEphemeralPublicKeys,
+    MutualAuthentication,
 }
 
 
@@ -96,6 +109,23 @@ pub enum Error {
         protocol: ObjectIdentifier,
         parameter: i32,
     },
+    ShortResponse {
+        operation: Operation,
+        response: Response,
+        min_data_len: usize,
+    },
+    UnexpectedType {
+        operation: Operation,
+        type_tag: u8,
+    },
+    TlvEncoding {
+        operation: Operation,
+        data: Zeroizing<Vec<u8>>,
+    },
+    DiffieHellmanKeysEqual,
+    MutualAuthentication,
+    PublicKey { bytes: Zeroizing<Vec<u8>> },
+    DiffieHellmanResult,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -116,6 +146,20 @@ impl fmt::Display for Error {
                 => write!(f, "custom parameters are not currently supported"),
             Self::IncompatibleProtocolParameter { protocol, parameter }
                 => write!(f, "protocol {} is incompatible with parameter {}", protocol, parameter),
+            Self::ShortResponse { operation, response, min_data_len }
+                => write!(f, "operation {:?} received short response {:?} (expected at least {} bytes)", operation, response, min_data_len),
+            Self::UnexpectedType { operation, type_tag }
+                => write!(f, "operation {:?} received response of unexpected type 0x{:02X}", operation, type_tag),
+            Self::TlvEncoding { operation, .. }
+                => write!(f, "invalid TLV encoding for operation {:?}", operation),
+            Self::DiffieHellmanKeysEqual
+                => write!(f, "terminal and chip Diffie-Hellman keys are equal"),
+            Self::MutualAuthentication
+                => write!(f, "mutual authentication failed"),
+            Self::PublicKey { .. }
+                => write!(f, "invalid public key"),
+            Self::DiffieHellmanResult
+                => write!(f, "invalid Diffie-Hellman result"),
         }
     }
 }
@@ -130,6 +174,13 @@ impl std::error::Error for Error {
             Self::OperationFailed { .. } => None,
             Self::CustomParameters => None,
             Self::IncompatibleProtocolParameter { .. } => None,
+            Self::ShortResponse { .. } => None,
+            Self::UnexpectedType { .. } => None,
+            Self::TlvEncoding { .. } => None,
+            Self::DiffieHellmanKeysEqual => None,
+            Self::MutualAuthentication => None,
+            Self::PublicKey { .. } => None,
+            Self::DiffieHellmanResult => None,
         }
     }
 }
@@ -147,6 +198,7 @@ enum KeyExchange {
     PrimeWeierstrassEllipticDiffieHellman(PrimeWeierstrassCurve),
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum CipherAndMac {
     ThreeDesCipherCbcMac,
     Aes128CipherCmacMac,
@@ -155,7 +207,41 @@ enum CipherAndMac {
 }
 
 
-pub fn set_authentication_template<SC: SmartCard>(card: &mut SC, mechanism: &Oid, password_source: PasswordSource) -> Result<(), CommunicationError> {
+fn extract_double_wrapped(operation: Operation, response: Response, outer_tag: u8, inner_tag: u8) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
+    if response.data.len() < 4 {
+        return Err(Error::ShortResponse {
+            operation,
+            response,
+            min_data_len: 4,
+        }.into());
+    }
+    if response.data[0] != outer_tag {
+        return Err(Error::UnexpectedType { operation, type_tag: response.data[0] }.into());
+    }
+    let (tlv_length, tlv_rest) = try_decode_primitive_length(&response.data)
+        .ok_or_else(|| Error::TlvEncoding { operation, data: Zeroizing::new(response.data.clone()) })?;
+    if tlv_length != tlv_rest.len() {
+        // consider this an error too
+        return Err(Error::TlvEncoding { operation, data: Zeroizing::new(response.data.clone()) }.into());
+    }
+
+    if tlv_rest.len() < 2 {
+        return Err(Error::ShortResponse {
+            operation,
+            response,
+            min_data_len: 2,
+        }.into());
+    }
+    if tlv_rest[0] != inner_tag {
+        return Err(Error::UnexpectedType { operation, type_tag: tlv_rest[0] }.into());
+    }
+    let (data_length, data_rest) = try_decode_primitive_length(tlv_rest)
+        .ok_or_else(|| Error::TlvEncoding { operation, data: Zeroizing::new(tlv_rest.to_vec()) })?;
+    Ok(Zeroizing::new(data_rest[0..data_length].to_vec()))
+}
+
+
+fn set_authentication_template<SC: SmartCard>(card: &mut SC, mechanism: &Oid, password_source: PasswordSource) -> Result<(), CommunicationError> {
     let mut request_data = Vec::new();
 
     // encode mechanism (0x80)
@@ -194,7 +280,7 @@ pub fn set_authentication_template<SC: SmartCard>(card: &mut SC, mechanism: &Oid
 }
 
 
-pub fn obtain_encrypted_nonce<SC: SmartCard>(card: &mut SC) -> Result<Vec<u8>, CommunicationError> {
+fn obtain_encrypted_nonce<SC: SmartCard>(card: &mut SC) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
     let request_data = vec![
         0x7C, // dynamic authentication data
         0x00, // no data
@@ -214,25 +300,411 @@ pub fn obtain_encrypted_nonce<SC: SmartCard>(card: &mut SC) -> Result<Vec<u8>, C
         },
     };
     let response = card.communicate(&request)?;
-    if response.trailer.to_word() == 0x9000 {
-        Ok(response.data)
-    } else {
-        Err(Error::OperationFailed {
+    if response.trailer.to_word() != 0x9000 {
+        return Err(Error::OperationFailed {
             operation: Operation::ObtainNonce,
             response,
-        }.into())
+        }.into());
+    }
+    extract_double_wrapped(Operation::ObtainNonce, response, 0x7C, 0x80)
+}
+
+
+fn exchange_mapping_public_keys<SC: SmartCard>(card: &mut SC, public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
+    let mut mapping_data_tlv = Zeroizing::new(vec![0x81]); // mapping data
+    encode_primitive_length(&mut mapping_data_tlv, public_key.len());
+    mapping_data_tlv.extend(public_key);
+
+    let mut request_data = vec![0x7C]; // dynamic authentication data
+    encode_primitive_length(&mut request_data, mapping_data_tlv.len());
+    request_data.extend(&*mapping_data_tlv);
+    // (Apdu will zeroize us on drop)
+
+    // do it
+    let request = Apdu {
+        header: CommandHeader {
+            cla: 0b000_1_00_00, // not the last in a chain, no secure messaging, logical channel 0
+            ins: 0x86, // GENERAL AUTHENTICATE
+            p1: 0x00, // algorithm is known (from "set authentication template")
+            p2: 0x00, // key index is known (from "set authentication template")
+        },
+        data: Data::BothDataShort {
+            request_data,
+            response_data_length: 0,
+        },
+    };
+    let response = card.communicate(&request)?;
+    if response.trailer.to_word() != 0x9000 {
+        return Err(Error::OperationFailed {
+            operation: Operation::ExchangeMappingPublicKeys,
+            response,
+        }.into());
+    }
+    extract_double_wrapped(Operation::ExchangeMappingPublicKeys, response, 0x7C, 0x81)
+}
+
+
+fn exchange_ephemeral_public_keys<SC: SmartCard>(card: &mut SC, public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
+    let mut mapping_data_tlv = Zeroizing::new(vec![0x83]); // ephemeral pubkey
+    encode_primitive_length(&mut mapping_data_tlv, public_key.len());
+    mapping_data_tlv.extend(public_key);
+
+    let mut request_data = vec![0x7C]; // dynamic authentication data
+    encode_primitive_length(&mut request_data, mapping_data_tlv.len());
+    request_data.extend(&*mapping_data_tlv);
+    // (Apdu will zeroize us on drop)
+
+    // do it
+    let request = Apdu {
+        header: CommandHeader {
+            cla: 0b000_1_00_00, // not the last in a chain, no secure messaging, logical channel 0
+            ins: 0x86, // GENERAL AUTHENTICATE
+            p1: 0x00, // algorithm is known (from "set authentication template")
+            p2: 0x00, // key index is known (from "set authentication template")
+        },
+        data: Data::BothDataShort {
+            request_data,
+            response_data_length: 0,
+        },
+    };
+    let response = card.communicate(&request)?;
+    if response.trailer.to_word() != 0x9000 {
+        return Err(Error::OperationFailed {
+            operation: Operation::ExchangeEphemeralPublicKeys,
+            response,
+        }.into());
+    }
+    extract_double_wrapped(Operation::ExchangeEphemeralPublicKeys, response, 0x7C, 0x84)
+}
+
+
+fn mutual_authentication<SC: SmartCard>(card: &mut SC, outgoing_token: &[u8]) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
+    let mut mapping_data_tlv = Zeroizing::new(vec![0x85]); // terminal's token
+    encode_primitive_length(&mut mapping_data_tlv, outgoing_token.len());
+    mapping_data_tlv.extend(outgoing_token);
+
+    let mut request_data = vec![0x7C]; // dynamic authentication data
+    encode_primitive_length(&mut request_data, mapping_data_tlv.len());
+    request_data.extend(&*mapping_data_tlv);
+    // (Apdu will zeroize us on drop)
+
+    // do it
+    let request = Apdu {
+        header: CommandHeader {
+            cla: 0b000_0_00_00, // last in a chain, no secure messaging, logical channel 0
+            ins: 0x86, // GENERAL AUTHENTICATE
+            p1: 0x00, // algorithm is known (from "set authentication template")
+            p2: 0x00, // key index is known (from "set authentication template")
+        },
+        data: Data::BothDataShort {
+            request_data,
+            response_data_length: 0,
+        },
+    };
+    let response = card.communicate(&request)?;
+    if response.trailer.to_word() != 0x9000 {
+        return Err(Error::OperationFailed {
+            operation: Operation::MutualAuthentication,
+            response,
+        }.into());
+    }
+    extract_double_wrapped(Operation::MutualAuthentication, response, 0x7C, 0x86)
+}
+
+
+/// Obtains an object that can perform secure messaging operations.
+fn obtain_secure_messaging_operations(cipher_and_mac: CipherAndMac) -> Box<dyn SecureMessagingOperations> {
+    match cipher_and_mac {
+        CipherAndMac::ThreeDesCipherCbcMac => Box::new(Smo3Des),
+        CipherAndMac::Aes128CipherCmacMac => Box::new(SmoAes128),
+        CipherAndMac::Aes192CipherCmacMac => Box::new(SmoAes192),
+        CipherAndMac::Aes256CipherCmacMac => Box::new(SmoAes256),
+    }
+}
+
+/// Obtains an object that can perform secure messaging operations.
+fn obtain_secure_messaging<'sc, SC: SmartCard>(
+    cipher_and_mac: CipherAndMac,
+    card: &'sc mut SC,
+    k_session_enc: &[u8],
+    k_session_mac: &[u8],
+    send_sequence_counter: &[u8],
+) -> Box<dyn SecureMessaging<SC> + 'sc> {
+    match cipher_and_mac {
+        CipherAndMac::ThreeDesCipherCbcMac => Box::new(Sm3Des::new(
+            card,
+            k_session_enc.try_into().unwrap(),
+            k_session_mac.try_into().unwrap(),
+            send_sequence_counter.try_into().unwrap(),
+        )),
+        CipherAndMac::Aes128CipherCmacMac => Box::new(SmAes128::new(
+            card,
+            k_session_enc.try_into().unwrap(),
+            k_session_mac.try_into().unwrap(),
+            send_sequence_counter.try_into().unwrap(),
+        )),
+        CipherAndMac::Aes192CipherCmacMac => Box::new(SmAes192::new(
+            card,
+            k_session_enc.try_into().unwrap(),
+            k_session_mac.try_into().unwrap(),
+            send_sequence_counter.try_into().unwrap(),
+        )),
+        CipherAndMac::Aes256CipherCmacMac => Box::new(SmAes256::new(
+            card,
+            k_session_enc.try_into().unwrap(),
+            k_session_mac.try_into().unwrap(),
+            send_sequence_counter.try_into().unwrap(),
+        )),
     }
 }
 
 
-/// Performs a key exchange using classic Diffie-Hellman.
-fn perform_kex_classic_dh<SC: SmartCard>(card: &mut SC, params: DiffieHellmanParams, cipher_and_mac: CipherAndMac) -> Result<Box<dyn SecureMessaging<SC>>, Error> {
-    todo!();
+/// Performs a generic mapping key exchange using classic Diffie-Hellman.
+fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
+    card: &'sc mut SC,
+    protocol: &Oid,
+    params: DiffieHellmanParams,
+    cipher_and_mac: CipherAndMac,
+    mrz_data: &[u8],
+    encrypted_nonce: &[u8],
+) -> Result<Box<dyn SecureMessaging<SC> + 'sc>, CommunicationError> {
+    // obtain the secure messaging operations for the given cipher and MAC
+    let secure_ops = obtain_secure_messaging_operations(cipher_and_mac);
+
+    // derive key from MRZ data
+    let mut mrz_hasher = Sha1::new();
+    mrz_hasher.update(mrz_data);
+    let mrz_hash = mrz_hasher.finalize();
+    let nonce_key = secure_ops.derive_key_from_password(&mrz_hash);
+
+    // decrypt the nonce
+    let nonce_iv = vec![0u8; secure_ops.cipher_block_size()];
+    let mut nonce_bytes = Zeroizing::new(encrypted_nonce.to_vec());
+    secure_ops.decrypt_padded_data(&mut nonce_bytes, &nonce_key, &nonce_iv);
+    let nonce = Zeroizing::new(boxed_uint_from_be_slice(&nonce_bytes));
+
+    // derive the shared secret for generic mapping using classic Diffie-Hellman
+    let derivation_shared_secret = {
+        let dh = DiffieHellman::new(params.clone());
+        let public_key = dh.public_key();
+        let public_key_bytes = Zeroizing::new(public_key.to_be_bytes());
+        let card_public_key_bytes = exchange_mapping_public_keys(card, &public_key_bytes)?;
+        let card_public_key = Zeroizing::new(boxed_uint_from_be_slice(&card_public_key_bytes));
+        dh.finalize(&card_public_key)
+    };
+
+    // perform generic mapping on the DH parameters
+    let session_params = params.derive_generic_mapping(&nonce, &derivation_shared_secret);
+
+    // second round of key agreement with the new parameters
+    let (shared_secret, public_key_bytes, card_public_key_bytes) = {
+        let session_dh = DiffieHellman::new(session_params);
+        let public_key = session_dh.public_key();
+        let public_key_bytes = Zeroizing::new(public_key.to_be_bytes());
+        let card_public_key_bytes = exchange_ephemeral_public_keys(card, &public_key_bytes)?;
+        if public_key_bytes.ct_eq(card_public_key_bytes.as_slice()).into() {
+            return Err(Error::DiffieHellmanKeysEqual.into());
+        }
+        let card_public_key = Zeroizing::new(boxed_uint_from_be_slice(&card_public_key_bytes));
+        let shared_secret = session_dh.finalize(&card_public_key);
+        (shared_secret, public_key_bytes, card_public_key_bytes)
+    };
+    let shared_secret_bytes = Zeroizing::new(shared_secret.to_be_bytes());
+
+    // derive keys
+    let k_session_enc = secure_ops.derive_encryption_key(&shared_secret_bytes);
+    let k_session_mac = secure_ops.derive_mac_key(&shared_secret_bytes);
+
+    // mutual authentication
+    let protocol_bytes = oid_to_der_bytes(&protocol);
+
+    let outgoing_token = {
+        // 0x06 LL protocol_oid 0x84 LL card_pubkey
+        let mut outgoing_inner_data = Zeroizing::new(Vec::new());
+        outgoing_inner_data.push(0x06); // OID of public key type
+        encode_primitive_length(&mut outgoing_inner_data, protocol_bytes.len());
+        outgoing_inner_data.extend(&protocol_bytes);
+        outgoing_inner_data.push(0x84); // public key data
+        encode_primitive_length(&mut outgoing_inner_data, card_public_key_bytes.len());
+
+        // 0x7F_0x49 LL inner_data
+        let mut outgoing_outer_data = Zeroizing::new(Vec::new());
+        outgoing_outer_data.extend(&[0x7F, 0x49]); // ASN.1 public key
+        encode_primitive_length(&mut outgoing_outer_data, outgoing_inner_data.len());
+        outgoing_outer_data.extend(outgoing_inner_data.as_slice());
+
+        // padding
+        outgoing_outer_data.push(0x80);
+        while outgoing_outer_data.len() % secure_ops.mac_block_size() != 0 {
+            outgoing_outer_data.push(0x00);
+        }
+
+        secure_ops.mac_padded_data(&outgoing_outer_data, &k_session_mac)
+    };
+
+    let expected_token = {
+        // 0x06 LL protocol_oid 0x84 LL my_pubkey
+        let mut expected_inner_data = Zeroizing::new(Vec::new());
+        expected_inner_data.push(0x06); // OID of public key type
+        encode_primitive_length(&mut expected_inner_data, protocol_bytes.len());
+        expected_inner_data.extend(&protocol_bytes);
+        expected_inner_data.push(0x84); // public key data
+        encode_primitive_length(&mut expected_inner_data, public_key_bytes.len());
+
+        // 0x7F_0x49 LL inner_data
+        let mut expected_outer_data = Zeroizing::new(Vec::new());
+        expected_outer_data.extend(&[0x7F, 0x49]); // ASN.1 public key
+        encode_primitive_length(&mut expected_outer_data, expected_inner_data.len());
+        expected_outer_data.extend(expected_inner_data.as_slice());
+
+        // padding
+        expected_outer_data.push(0x80);
+        while expected_outer_data.len() % secure_ops.mac_block_size() != 0 {
+            expected_outer_data.push(0x00);
+        }
+
+        secure_ops.mac_padded_data(&expected_outer_data, &k_session_mac)
+    };
+
+    // mutual authentication
+    let incoming_token = mutual_authentication(card, &outgoing_token)?;
+    if !bool::from(incoming_token.ct_eq(&expected_token)) {
+        return Err(Error::MutualAuthentication.into());
+    }
+
+    // set up secure messaging
+    // the initial send sequence counter is all-zeroes for PACE
+    let send_sequence_counter = vec![0u8; secure_ops.cipher_block_size()];
+    Ok(obtain_secure_messaging(cipher_and_mac, card, &k_session_enc, &k_session_mac, &send_sequence_counter))
 }
 
-/// Performs a key exchange using elliptic-curve Diffie-Hellman on a prime Weierstrass curve.
-fn perform_kex_weierstrass_ecdh<SC: SmartCard>(card: &mut SC, curve: PrimeWeierstrassCurve, cipher_and_mac: CipherAndMac) -> Result<Box<dyn SecureMessaging<SC>>, Error> {
-    todo!();
+/// Performs a generic mapping key exchange using elliptic-curve Diffie-Hellman on a prime Weierstrass curve.
+fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
+    card: &'sc mut SC,
+    protocol: &Oid,
+    curve: PrimeWeierstrassCurve,
+    cipher_and_mac: CipherAndMac,
+    mrz_data: &[u8],
+    encrypted_nonce: &[u8],
+) -> Result<Box<dyn SecureMessaging<SC> + 'sc>, CommunicationError> {
+    // obtain the secure messaging operations for the given cipher and MAC
+    let secure_ops = obtain_secure_messaging_operations(cipher_and_mac);
+
+    // derive key from MRZ data
+    let mut mrz_hasher = Sha1::new();
+    mrz_hasher.update(mrz_data);
+    let mrz_hash = mrz_hasher.finalize();
+    let nonce_key = secure_ops.derive_key_from_password(&mrz_hash);
+
+    // decrypt the nonce
+    let nonce_iv = vec![0u8; secure_ops.cipher_block_size()];
+    let mut nonce_bytes = Zeroizing::new(encrypted_nonce.to_vec());
+    secure_ops.decrypt_padded_data(&mut nonce_bytes, &nonce_key, &nonce_iv);
+    let nonce = Zeroizing::new(boxed_uint_from_be_slice(&nonce_bytes));
+
+    // derive the shared secret for generic mapping using elliptic-curve Diffie-Hellman
+    let derivation_shared_secret = {
+        let mut private_key_bytes = Zeroizing::new(vec![0u8; curve.private_key_len_bytes()]);
+        OsRng.fill_bytes(private_key_bytes.as_mut_slice());
+        let private_key = Zeroizing::new(boxed_uint_from_be_slice(private_key_bytes.as_slice()));
+
+        let public_key = curve.calculate_public_key(&*private_key);
+        let public_key_bytes = public_key.to_be_bytes(curve.private_key_len_bytes());
+        let card_public_key_bytes = exchange_mapping_public_keys(card, &public_key_bytes)?;
+        let card_public_key = AffinePoint::try_from_be_bytes(card_public_key_bytes.as_slice())
+            .ok_or(Error::PublicKey { bytes: card_public_key_bytes })?;
+        curve.diffie_hellman(&*private_key, &card_public_key)
+            .into_option().ok_or(Error::DiffieHellmanResult)?
+    };
+
+    // perform generic mapping on the DH parameters
+    let session_curve = curve.derive_generic_mapping_session_curve(&*nonce, &derivation_shared_secret);
+
+    // second round of key agreement with the new parameters
+    let (shared_secret, public_key_bytes, card_public_key_bytes) = {
+        let mut private_key_bytes = Zeroizing::new(vec![0u8; session_curve.private_key_len_bytes()]);
+        OsRng.fill_bytes(private_key_bytes.as_mut_slice());
+        let private_key = Zeroizing::new(boxed_uint_from_be_slice(private_key_bytes.as_slice()));
+
+        let public_key = session_curve.calculate_public_key(&*private_key);
+        let public_key_bytes = public_key.to_be_bytes(session_curve.private_key_len_bytes());
+        let card_public_key_bytes = exchange_ephemeral_public_keys(card, &public_key_bytes)?;
+        if public_key_bytes.ct_eq(card_public_key_bytes.as_slice()).into() {
+            return Err(Error::DiffieHellmanKeysEqual.into());
+        }
+        let card_public_key = AffinePoint::try_from_be_bytes(card_public_key_bytes.as_slice())
+            .ok_or_else(|| Error::PublicKey { bytes: card_public_key_bytes.clone() })?;
+        let shared_secret = session_curve.diffie_hellman(&*private_key, &card_public_key)
+            .into_option().ok_or(Error::DiffieHellmanResult)?;
+        (shared_secret, public_key_bytes, card_public_key_bytes)
+    };
+    let shared_secret_bytes = Zeroizing::new(shared_secret.x().to_be_bytes());
+
+    // derive keys
+    let k_session_enc = secure_ops.derive_encryption_key(&shared_secret_bytes);
+    let k_session_mac = secure_ops.derive_mac_key(&shared_secret_bytes);
+
+    // mutual authentication
+    let protocol_bytes = oid_to_der_bytes(&protocol);
+
+    let outgoing_token = {
+        // 0x06 LL protocol_oid 0x84 LL card_pubkey
+        let mut outgoing_inner_data = Zeroizing::new(Vec::new());
+        outgoing_inner_data.push(0x06); // OID of public key type
+        encode_primitive_length(&mut outgoing_inner_data, protocol_bytes.len());
+        outgoing_inner_data.extend(&protocol_bytes);
+        outgoing_inner_data.push(0x84); // public key data
+        encode_primitive_length(&mut outgoing_inner_data, card_public_key_bytes.len());
+
+        // 0x7F_0x49 LL inner_data
+        let mut outgoing_outer_data = Zeroizing::new(Vec::new());
+        outgoing_outer_data.extend(&[0x7F, 0x49]); // ASN.1 public key
+        encode_primitive_length(&mut outgoing_outer_data, outgoing_inner_data.len());
+        outgoing_outer_data.extend(outgoing_inner_data.as_slice());
+
+        // padding
+        outgoing_outer_data.push(0x80);
+        while outgoing_outer_data.len() % secure_ops.mac_block_size() != 0 {
+            outgoing_outer_data.push(0x00);
+        }
+
+        secure_ops.mac_padded_data(&outgoing_outer_data, &k_session_mac)
+    };
+
+    let expected_token = {
+        // 0x06 LL protocol_oid 0x84 LL my_pubkey
+        let mut expected_inner_data = Zeroizing::new(Vec::new());
+        expected_inner_data.push(0x06); // OID of public key type
+        encode_primitive_length(&mut expected_inner_data, protocol_bytes.len());
+        expected_inner_data.extend(&protocol_bytes);
+        expected_inner_data.push(0x84); // public key data
+        encode_primitive_length(&mut expected_inner_data, public_key_bytes.len());
+
+        // 0x7F_0x49 LL inner_data
+        let mut expected_outer_data = Zeroizing::new(Vec::new());
+        expected_outer_data.extend(&[0x7F, 0x49]); // ASN.1 public key
+        encode_primitive_length(&mut expected_outer_data, expected_inner_data.len());
+        expected_outer_data.extend(expected_inner_data.as_slice());
+
+        // padding
+        expected_outer_data.push(0x80);
+        while expected_outer_data.len() % secure_ops.mac_block_size() != 0 {
+            expected_outer_data.push(0x00);
+        }
+
+        secure_ops.mac_padded_data(&expected_outer_data, &k_session_mac)
+    };
+
+    // mutual authentication
+    let incoming_token = mutual_authentication(card, &outgoing_token)?;
+    if !bool::from(incoming_token.ct_eq(&expected_token)) {
+        return Err(Error::MutualAuthentication.into());
+    }
+
+    // set up secure messaging
+    // the initial send sequence counter is all-zeroes for PACE
+    let send_sequence_counter = vec![0u8; secure_ops.cipher_block_size()];
+    Ok(obtain_secure_messaging(cipher_and_mac, card, &k_session_enc, &k_session_mac, &send_sequence_counter))
 }
 
 
@@ -244,7 +716,11 @@ macro_rules! equals_any {
 
 
 /// Authenticates with the card using PACE.
-pub fn establish<SC: SmartCard>(card: &mut SC, card_access: &[u8]) -> Result<Box<dyn SecureMessaging<SC>>, Error> {
+///
+/// `card_access` is the data read from the file `EF.CardAccess`; `mrz_data` corresponds to the concatenation of
+/// document number (including check digit), date of birth (including check digit) and date of expiry (including check
+/// digit).
+pub fn establish<'sc, SC: SmartCard>(card: &'sc mut SC, card_access: &[u8], mrz_data: &[u8]) -> Result<Box<dyn SecureMessaging<SC> + 'sc>, CommunicationError> {
     // card_access is the data in EF.CardAccess, which is DER-encoded
 
     // try to decode its base structure as a SET OF Any (SetOf<Any>)
@@ -298,7 +774,7 @@ pub fn establish<SC: SmartCard>(card: &mut SC, card_access: &[u8]) -> Result<Box
                 match unsupported_mapping {
                     Some(protocol) => Error::MappingNotSupported { protocol },
                     None => Error::NotSupported,
-                }
+                }.into()
             );
         },
     };
@@ -318,7 +794,7 @@ pub fn establish<SC: SmartCard>(card: &mut SC, card_access: &[u8]) -> Result<Box
             0 => KeyExchange::ClassicDiffieHellman(crate::pace::crypt::dh::params::get_1024_modp_160_po()),
             1 => KeyExchange::ClassicDiffieHellman(crate::pace::crypt::dh::params::get_2048_modp_224_po()),
             2 => KeyExchange::ClassicDiffieHellman(crate::pace::crypt::dh::params::get_2048_modp_256_po()),
-            other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }),
+            other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }.into()),
         }
     } else if equals_any!(
         pace_info.protocol,
@@ -338,7 +814,7 @@ pub fn establish<SC: SmartCard>(card: &mut SC, card_access: &[u8]) -> Result<Box
             16 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p384r1()),
             17 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p512r1()),
             18 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p521()),
-            other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }),
+            other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }.into()),
         }
     } else {
         unreachable!()
@@ -355,8 +831,18 @@ pub fn establish<SC: SmartCard>(card: &mut SC, card_access: &[u8]) -> Result<Box
         unreachable!()
     };
 
+    // choose the encryption method
+    set_authentication_template(card, &pace_info.protocol, PasswordSource::Mrz)?;
+
+    // obtain the encrypted nonce from the chip
+    let nonce_data = obtain_encrypted_nonce(card)?;
+
     match key_exchange {
-        KeyExchange::ClassicDiffieHellman(params) => perform_kex_classic_dh(card, params, cipher_and_mac),
-        KeyExchange::PrimeWeierstrassEllipticDiffieHellman(curve) => perform_kex_weierstrass_ecdh(card, curve, cipher_and_mac),
+        KeyExchange::ClassicDiffieHellman(params) => perform_gm_kex_classic_dh(
+            card, &pace_info.protocol, params, cipher_and_mac, mrz_data, &nonce_data,
+        ),
+        KeyExchange::PrimeWeierstrassEllipticDiffieHellman(curve) => perform_gm_kex_weierstrass_ecdh(
+            card, &pace_info.protocol, curve, cipher_and_mac, mrz_data, &nonce_data,
+        ),
     }
 }

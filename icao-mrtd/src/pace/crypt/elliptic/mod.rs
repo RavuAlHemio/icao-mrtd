@@ -9,7 +9,10 @@ use std::ops::{Add, Mul};
 use crypto_bigint::{BoxedUint, Integer};
 use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
+use zeroize::Zeroizing;
 use zeroize_derive::ZeroizeOnDrop;
+
+use crate::pace::crypt::boxed_uint_from_be_slice;
 
 
 /// A point in affine coordinates.
@@ -21,6 +24,54 @@ pub struct AffinePoint {
 impl AffinePoint {
     pub const fn new(x: BoxedUint, y: BoxedUint) -> Self {
         Self { x, y }
+    }
+
+    pub fn x(&self) -> &BoxedUint { &self.x }
+    pub fn y(&self) -> &BoxedUint { &self.y }
+
+    pub fn to_be_bytes(&self, bytes_per_component: usize) -> Zeroizing<Vec<u8>> {
+        let mut ret = Zeroizing::new(Vec::with_capacity(1 + 2*bytes_per_component));
+        ret.push(0x04); // uncompressed coordinates
+
+        let x_bytes = Zeroizing::new(self.x.to_be_bytes());
+        assert!(x_bytes.len() <= bytes_per_component);
+        for _ in 0..(bytes_per_component - x_bytes.len()) {
+            ret.push(0x00);
+        }
+        ret.extend(&*x_bytes);
+
+        let y_bytes = Zeroizing::new(self.y.to_be_bytes());
+        assert!(y_bytes.len() <= bytes_per_component);
+        for _ in 0..(bytes_per_component - y_bytes.len()) {
+            ret.push(0x00);
+        }
+        ret.extend(&*y_bytes);
+
+        ret
+    }
+
+    pub fn try_from_be_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 3 {
+            // mode x y
+            return None;
+        }
+        if bytes[0] != 0x04 {
+            // we only support the uncompressed representation
+            return None;
+        }
+        if (bytes.len() - 1) % 2 != 0 {
+            // it must be possible to split the value in the middle
+            return None;
+        }
+        let coordinate_length = (bytes.len() - 1) / 2;
+
+        let x_bytes = &bytes[1..1+coordinate_length];
+        let y_bytes = &bytes[1+coordinate_length..];
+        assert_eq!(x_bytes.len(), y_bytes.len());
+
+        let x = boxed_uint_from_be_slice(x_bytes);
+        let y = boxed_uint_from_be_slice(y_bytes);
+        Some(Self { x, y })
     }
 }
 
@@ -91,6 +142,20 @@ impl PrimeWeierstrassCurve {
     pub fn coefficient_a(&self) -> &BoxedUint { &self.coefficient_a }
     pub fn coefficient_b(&self) -> &BoxedUint { &self.coefficient_b }
     pub fn generator(&self) -> &AffinePoint { &self.generator }
+
+    /// Calculates the number of bytes a private key used with this curve should have.
+    pub fn private_key_len_bytes(&self) -> usize {
+        let mut bits = self.prime().bits();
+        let mut bytes = 0;
+        while bits >= 8 {
+            bits -= 8;
+            bytes += 1;
+        }
+        if bits > 0 {
+            bytes += 1;
+        }
+        bytes
+    }
 
     /// Returns important curve parameters for operations in Montgomery form.
     fn monty_knowledge(&self) -> MontyKnowledge {

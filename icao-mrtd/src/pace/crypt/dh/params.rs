@@ -4,7 +4,6 @@
 //! Document 9303 Part 11 Section 9.5.1.
 
 
-use crypto_bigint::BoxedUint;
 use hex_literal::hex;
 
 use crate::pace::crypt::boxed_uint_from_be_slice;
