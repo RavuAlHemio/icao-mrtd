@@ -2,12 +2,13 @@
 
 
 pub mod asn1;
-mod crypt;
+pub mod crypt;
 
 
 use std::fmt;
 
 use crypt::elliptic::AffinePoint;
+use crypto_bigint::BoxedUint;
 use digest::Digest;
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -199,7 +200,7 @@ enum KeyExchange {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-enum CipherAndMac {
+pub enum CipherAndMac {
     ThreeDesCipherCbcMac,
     Aes128CipherCmacMac,
     Aes192CipherCmacMac,
@@ -218,7 +219,7 @@ fn extract_double_wrapped(operation: Operation, response: Response, outer_tag: u
     if response.data[0] != outer_tag {
         return Err(Error::UnexpectedType { operation, type_tag: response.data[0] }.into());
     }
-    let (tlv_length, tlv_rest) = try_decode_primitive_length(&response.data)
+    let (tlv_length, tlv_rest) = try_decode_primitive_length(&response.data[1..])
         .ok_or_else(|| Error::TlvEncoding { operation, data: Zeroizing::new(response.data.clone()) })?;
     if tlv_length != tlv_rest.len() {
         // consider this an error too
@@ -235,13 +236,13 @@ fn extract_double_wrapped(operation: Operation, response: Response, outer_tag: u
     if tlv_rest[0] != inner_tag {
         return Err(Error::UnexpectedType { operation, type_tag: tlv_rest[0] }.into());
     }
-    let (data_length, data_rest) = try_decode_primitive_length(tlv_rest)
+    let (data_length, data_rest) = try_decode_primitive_length(&tlv_rest[1..])
         .ok_or_else(|| Error::TlvEncoding { operation, data: Zeroizing::new(tlv_rest.to_vec()) })?;
     Ok(Zeroizing::new(data_rest[0..data_length].to_vec()))
 }
 
 
-fn set_authentication_template<SC: SmartCard>(card: &mut SC, mechanism: &Oid, password_source: PasswordSource) -> Result<(), CommunicationError> {
+pub fn set_authentication_template<SC: SmartCard>(card: &mut SC, mechanism: &Oid, password_source: PasswordSource) -> Result<(), CommunicationError> {
     let mut request_data = Vec::new();
 
     // encode mechanism (0x80)
@@ -280,7 +281,7 @@ fn set_authentication_template<SC: SmartCard>(card: &mut SC, mechanism: &Oid, pa
 }
 
 
-fn obtain_encrypted_nonce<SC: SmartCard>(card: &mut SC) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
+pub fn obtain_encrypted_nonce<SC: SmartCard>(card: &mut SC) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
     let request_data = vec![
         0x7C, // dynamic authentication data
         0x00, // no data
@@ -340,7 +341,7 @@ fn exchange_mapping_public_keys<SC: SmartCard>(card: &mut SC, public_key: &[u8])
             response,
         }.into());
     }
-    extract_double_wrapped(Operation::ExchangeMappingPublicKeys, response, 0x7C, 0x81)
+    extract_double_wrapped(Operation::ExchangeMappingPublicKeys, response, 0x7C, 0x82)
 }
 
 
@@ -459,14 +460,16 @@ fn obtain_secure_messaging<'sc, SC: SmartCard>(
 }
 
 
-/// Performs a generic mapping key exchange using classic Diffie-Hellman.
-fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
+/// Performs a generic mapping key exchange using classic Diffie-Hellman and specific values.
+pub fn perform_gm_kex_classic_dh_with_values<'sc, SC: SmartCard>(
     card: &'sc mut SC,
     protocol: &Oid,
     params: DiffieHellmanParams,
     cipher_and_mac: CipherAndMac,
     mrz_data: &[u8],
     encrypted_nonce: &[u8],
+    derivation_private_key: &BoxedUint,
+    session_private_key: &BoxedUint,
 ) -> Result<Box<dyn SecureMessaging<SC> + 'sc>, CommunicationError> {
     // obtain the secure messaging operations for the given cipher and MAC
     let secure_ops = obtain_secure_messaging_operations(cipher_and_mac);
@@ -485,7 +488,7 @@ fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
 
     // derive the shared secret for generic mapping using classic Diffie-Hellman
     let derivation_shared_secret = {
-        let dh = DiffieHellman::new(params.clone());
+        let dh = DiffieHellman::new_with_private_key(params.clone(), derivation_private_key.clone());
         let public_key = dh.public_key();
         let public_key_bytes = Zeroizing::new(public_key.to_be_bytes());
         let card_public_key_bytes = exchange_mapping_public_keys(card, &public_key_bytes)?;
@@ -498,7 +501,7 @@ fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
 
     // second round of key agreement with the new parameters
     let (shared_secret, public_key_bytes, card_public_key_bytes) = {
-        let session_dh = DiffieHellman::new(session_params);
+        let session_dh = DiffieHellman::new_with_private_key(session_params, session_private_key.clone());
         let public_key = session_dh.public_key();
         let public_key_bytes = Zeroizing::new(public_key.to_be_bytes());
         let card_public_key_bytes = exchange_ephemeral_public_keys(card, &public_key_bytes)?;
@@ -524,8 +527,9 @@ fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
         outgoing_inner_data.push(0x06); // OID of public key type
         encode_primitive_length(&mut outgoing_inner_data, protocol_bytes.len());
         outgoing_inner_data.extend(&protocol_bytes);
-        outgoing_inner_data.push(0x84); // public key data
+        outgoing_inner_data.push(0x84); // DH public key
         encode_primitive_length(&mut outgoing_inner_data, card_public_key_bytes.len());
+        outgoing_inner_data.extend(card_public_key_bytes.as_slice());
 
         // 0x7F_0x49 LL inner_data
         let mut outgoing_outer_data = Zeroizing::new(Vec::new());
@@ -533,10 +537,12 @@ fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
         encode_primitive_length(&mut outgoing_outer_data, outgoing_inner_data.len());
         outgoing_outer_data.extend(outgoing_inner_data.as_slice());
 
-        // padding
-        outgoing_outer_data.push(0x80);
-        while outgoing_outer_data.len() % secure_ops.mac_block_size() != 0 {
-            outgoing_outer_data.push(0x00);
+        if secure_ops.mac_block_size() > 1 {
+            // padding
+            outgoing_outer_data.push(0x80);
+            while outgoing_outer_data.len() % secure_ops.mac_block_size() != 0 {
+                outgoing_outer_data.push(0x00);
+            }
         }
 
         secure_ops.mac_padded_data(&outgoing_outer_data, &k_session_mac)
@@ -548,8 +554,9 @@ fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
         expected_inner_data.push(0x06); // OID of public key type
         encode_primitive_length(&mut expected_inner_data, protocol_bytes.len());
         expected_inner_data.extend(&protocol_bytes);
-        expected_inner_data.push(0x84); // public key data
+        expected_inner_data.push(0x84); // DH public key
         encode_primitive_length(&mut expected_inner_data, public_key_bytes.len());
+        expected_inner_data.extend(&*public_key_bytes);
 
         // 0x7F_0x49 LL inner_data
         let mut expected_outer_data = Zeroizing::new(Vec::new());
@@ -557,10 +564,12 @@ fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
         encode_primitive_length(&mut expected_outer_data, expected_inner_data.len());
         expected_outer_data.extend(expected_inner_data.as_slice());
 
-        // padding
-        expected_outer_data.push(0x80);
-        while expected_outer_data.len() % secure_ops.mac_block_size() != 0 {
-            expected_outer_data.push(0x00);
+        if secure_ops.mac_block_size() > 1 {
+            // padding
+            expected_outer_data.push(0x80);
+            while expected_outer_data.len() % secure_ops.mac_block_size() != 0 {
+                expected_outer_data.push(0x00);
+            }
         }
 
         secure_ops.mac_padded_data(&expected_outer_data, &k_session_mac)
@@ -578,14 +587,47 @@ fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
     Ok(obtain_secure_messaging(cipher_and_mac, card, &k_session_enc, &k_session_mac, &send_sequence_counter))
 }
 
-/// Performs a generic mapping key exchange using elliptic-curve Diffie-Hellman on a prime Weierstrass curve.
-fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
+
+/// Performs a generic mapping key exchange using classic Diffie-Hellman.
+fn perform_gm_kex_classic_dh<'sc, SC: SmartCard>(
+    card: &'sc mut SC,
+    protocol: &Oid,
+    params: DiffieHellmanParams,
+    cipher_and_mac: CipherAndMac,
+    mrz_data: &[u8],
+    encrypted_nonce: &[u8],
+) -> Result<Box<dyn SecureMessaging<SC> + 'sc>, CommunicationError> {
+    let mut derivation_private_key_bytes = Zeroizing::new(vec![0u8; params.subgroup_size_bytes()]);
+    OsRng.fill_bytes(derivation_private_key_bytes.as_mut_slice());
+    let derivation_private_key = Zeroizing::new(boxed_uint_from_be_slice(derivation_private_key_bytes.as_slice()));
+
+    let mut session_private_key_bytes = Zeroizing::new(vec![0u8; params.subgroup_size_bytes()]);
+    OsRng.fill_bytes(session_private_key_bytes.as_mut_slice());
+    let session_private_key = Zeroizing::new(boxed_uint_from_be_slice(session_private_key_bytes.as_slice()));
+
+    perform_gm_kex_classic_dh_with_values(
+        card,
+        protocol,
+        params,
+        cipher_and_mac,
+        mrz_data,
+        encrypted_nonce,
+        &*derivation_private_key,
+        &*session_private_key,
+    )
+}
+
+/// Performs a generic mapping key exchange using elliptic-curve Diffie-Hellman on a prime Weierstrass curve and
+/// specific values.
+pub fn perform_gm_kex_weierstrass_ecdh_with_values<'sc, SC: SmartCard>(
     card: &'sc mut SC,
     protocol: &Oid,
     curve: PrimeWeierstrassCurve,
     cipher_and_mac: CipherAndMac,
     mrz_data: &[u8],
     encrypted_nonce: &[u8],
+    derivation_private_key: &BoxedUint,
+    session_private_key: &BoxedUint,
 ) -> Result<Box<dyn SecureMessaging<SC> + 'sc>, CommunicationError> {
     // obtain the secure messaging operations for the given cipher and MAC
     let secure_ops = obtain_secure_messaging_operations(cipher_and_mac);
@@ -604,16 +646,12 @@ fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
 
     // derive the shared secret for generic mapping using elliptic-curve Diffie-Hellman
     let derivation_shared_secret = {
-        let mut private_key_bytes = Zeroizing::new(vec![0u8; curve.private_key_len_bytes()]);
-        OsRng.fill_bytes(private_key_bytes.as_mut_slice());
-        let private_key = Zeroizing::new(boxed_uint_from_be_slice(private_key_bytes.as_slice()));
-
-        let public_key = curve.calculate_public_key(&*private_key);
+        let public_key = curve.calculate_public_key(derivation_private_key);
         let public_key_bytes = public_key.to_be_bytes(curve.private_key_len_bytes());
         let card_public_key_bytes = exchange_mapping_public_keys(card, &public_key_bytes)?;
         let card_public_key = AffinePoint::try_from_be_bytes(card_public_key_bytes.as_slice())
             .ok_or(Error::PublicKey { bytes: card_public_key_bytes })?;
-        curve.diffie_hellman(&*private_key, &card_public_key)
+        curve.diffie_hellman(derivation_private_key, &card_public_key)
             .into_option().ok_or(Error::DiffieHellmanResult)?
     };
 
@@ -622,11 +660,7 @@ fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
 
     // second round of key agreement with the new parameters
     let (shared_secret, public_key_bytes, card_public_key_bytes) = {
-        let mut private_key_bytes = Zeroizing::new(vec![0u8; session_curve.private_key_len_bytes()]);
-        OsRng.fill_bytes(private_key_bytes.as_mut_slice());
-        let private_key = Zeroizing::new(boxed_uint_from_be_slice(private_key_bytes.as_slice()));
-
-        let public_key = session_curve.calculate_public_key(&*private_key);
+        let public_key = session_curve.calculate_public_key(session_private_key);
         let public_key_bytes = public_key.to_be_bytes(session_curve.private_key_len_bytes());
         let card_public_key_bytes = exchange_ephemeral_public_keys(card, &public_key_bytes)?;
         if public_key_bytes.ct_eq(card_public_key_bytes.as_slice()).into() {
@@ -634,7 +668,7 @@ fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
         }
         let card_public_key = AffinePoint::try_from_be_bytes(card_public_key_bytes.as_slice())
             .ok_or_else(|| Error::PublicKey { bytes: card_public_key_bytes.clone() })?;
-        let shared_secret = session_curve.diffie_hellman(&*private_key, &card_public_key)
+        let shared_secret = session_curve.diffie_hellman(session_private_key, &card_public_key)
             .into_option().ok_or(Error::DiffieHellmanResult)?;
         (shared_secret, public_key_bytes, card_public_key_bytes)
     };
@@ -653,8 +687,9 @@ fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
         outgoing_inner_data.push(0x06); // OID of public key type
         encode_primitive_length(&mut outgoing_inner_data, protocol_bytes.len());
         outgoing_inner_data.extend(&protocol_bytes);
-        outgoing_inner_data.push(0x84); // public key data
+        outgoing_inner_data.push(0x86); // elliptic curve point
         encode_primitive_length(&mut outgoing_inner_data, card_public_key_bytes.len());
+        outgoing_inner_data.extend(card_public_key_bytes.as_slice());
 
         // 0x7F_0x49 LL inner_data
         let mut outgoing_outer_data = Zeroizing::new(Vec::new());
@@ -662,10 +697,12 @@ fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
         encode_primitive_length(&mut outgoing_outer_data, outgoing_inner_data.len());
         outgoing_outer_data.extend(outgoing_inner_data.as_slice());
 
-        // padding
-        outgoing_outer_data.push(0x80);
-        while outgoing_outer_data.len() % secure_ops.mac_block_size() != 0 {
-            outgoing_outer_data.push(0x00);
+        if secure_ops.mac_block_size() > 1 {
+            // padding
+            outgoing_outer_data.push(0x80);
+            while outgoing_outer_data.len() % secure_ops.mac_block_size() != 0 {
+                outgoing_outer_data.push(0x00);
+            }
         }
 
         secure_ops.mac_padded_data(&outgoing_outer_data, &k_session_mac)
@@ -677,8 +714,9 @@ fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
         expected_inner_data.push(0x06); // OID of public key type
         encode_primitive_length(&mut expected_inner_data, protocol_bytes.len());
         expected_inner_data.extend(&protocol_bytes);
-        expected_inner_data.push(0x84); // public key data
+        expected_inner_data.push(0x86); // elliptic curve point
         encode_primitive_length(&mut expected_inner_data, public_key_bytes.len());
+        expected_inner_data.extend(public_key_bytes.as_slice());
 
         // 0x7F_0x49 LL inner_data
         let mut expected_outer_data = Zeroizing::new(Vec::new());
@@ -686,10 +724,12 @@ fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
         encode_primitive_length(&mut expected_outer_data, expected_inner_data.len());
         expected_outer_data.extend(expected_inner_data.as_slice());
 
-        // padding
-        expected_outer_data.push(0x80);
-        while expected_outer_data.len() % secure_ops.mac_block_size() != 0 {
-            expected_outer_data.push(0x00);
+        if secure_ops.mac_block_size() > 1 {
+            // padding
+            expected_outer_data.push(0x80);
+            while expected_outer_data.len() % secure_ops.mac_block_size() != 0 {
+                expected_outer_data.push(0x00);
+            }
         }
 
         secure_ops.mac_padded_data(&expected_outer_data, &k_session_mac)
@@ -705,6 +745,36 @@ fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
     // the initial send sequence counter is all-zeroes for PACE
     let send_sequence_counter = vec![0u8; secure_ops.cipher_block_size()];
     Ok(obtain_secure_messaging(cipher_and_mac, card, &k_session_enc, &k_session_mac, &send_sequence_counter))
+}
+
+
+/// Performs a generic mapping key exchange using elliptic-curve Diffie-Hellman on a prime Weierstrass curve.
+fn perform_gm_kex_weierstrass_ecdh<'sc, SC: SmartCard>(
+    card: &'sc mut SC,
+    protocol: &Oid,
+    curve: PrimeWeierstrassCurve,
+    cipher_and_mac: CipherAndMac,
+    mrz_data: &[u8],
+    encrypted_nonce: &[u8],
+) -> Result<Box<dyn SecureMessaging<SC> + 'sc>, CommunicationError> {
+    let mut derivation_private_key_bytes = Zeroizing::new(vec![0u8; curve.private_key_len_bytes()]);
+    OsRng.fill_bytes(derivation_private_key_bytes.as_mut_slice());
+    let derivation_private_key = Zeroizing::new(boxed_uint_from_be_slice(&derivation_private_key_bytes));
+
+    let mut session_private_key_bytes = Zeroizing::new(vec![0u8; curve.private_key_len_bytes()]);
+    OsRng.fill_bytes(session_private_key_bytes.as_mut_slice());
+    let session_private_key = Zeroizing::new(boxed_uint_from_be_slice(&session_private_key_bytes));
+
+    perform_gm_kex_weierstrass_ecdh_with_values(
+        card,
+        protocol,
+        curve,
+        cipher_and_mac,
+        mrz_data,
+        encrypted_nonce,
+        &*derivation_private_key,
+        &*session_private_key,
+    )
 }
 
 

@@ -68,7 +68,7 @@ pub fn establish_from_values<'c, SC: SmartCard>(
 
     // pad according to ISO 7816, then generate MAC
     Iso7816::raw_pad(&mut ext_auth_data, 32);
-    let mac = Smo3Des.mac_padded_data(&k_mac, &k_mac);
+    let mac = Smo3Des.mac_padded_data(ext_auth_data.as_slice(), &k_mac);
     // MAC fits right where the padding was
     ext_auth_data[32..32+8].copy_from_slice(mac.as_slice());
 

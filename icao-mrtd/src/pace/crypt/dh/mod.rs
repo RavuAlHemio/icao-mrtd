@@ -1,7 +1,7 @@
 //! The Diffie-Hellman secret exchange process.
 
 
-pub(crate) mod params;
+pub mod params;
 
 
 use crypto_bigint::BoxedUint;
@@ -13,7 +13,7 @@ use zeroize_derive::ZeroizeOnDrop;
 
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
-pub(crate) struct DiffieHellmanParams {
+pub struct DiffieHellmanParams {
     /// The prime or modulus.
     prime: BoxedUint,
 
@@ -78,6 +78,7 @@ impl DiffieHellman {
     /// generated private key.
     ///
     /// The length of the private key matches the subgroup size as provided in the parameters.
+    #[allow(unused)]
     pub fn new(params: DiffieHellmanParams) -> Self {
         // generate a private key
         let mut private_key_bytes = vec![0u8; params.subgroup_size_bytes];

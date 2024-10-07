@@ -1,7 +1,7 @@
 //! Elliptic-curve cryptography.
 
 
-pub(crate) mod curves;
+pub mod curves;
 
 
 use std::ops::{Add, Mul};

@@ -598,7 +598,7 @@ pub trait SecureMessaging<SC: SmartCard> {
             data.extend(field.data);
         }
         data.push(0x80);
-        while data.len() & mac_block_size != 0 {
+        while data.len() % mac_block_size != 0 {
             data.push(0x00);
         }
         if !self.verify_mac_padded_data(&data, received_mac) {
