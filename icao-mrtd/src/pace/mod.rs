@@ -682,7 +682,7 @@ pub fn perform_gm_kex_weierstrass_ecdh_with_values<'sc, SC: SmartCard>(
     let protocol_bytes = oid_to_der_bytes(&protocol);
 
     let outgoing_token = {
-        // 0x06 LL protocol_oid 0x84 LL card_pubkey
+        // 0x06 LL protocol_oid 0x86 LL card_pubkey
         let mut outgoing_inner_data = Zeroizing::new(Vec::new());
         outgoing_inner_data.push(0x06); // OID of public key type
         encode_primitive_length(&mut outgoing_inner_data, protocol_bytes.len());
@@ -709,7 +709,7 @@ pub fn perform_gm_kex_weierstrass_ecdh_with_values<'sc, SC: SmartCard>(
     };
 
     let expected_token = {
-        // 0x06 LL protocol_oid 0x84 LL my_pubkey
+        // 0x06 LL protocol_oid 0x86 LL my_pubkey
         let mut expected_inner_data = Zeroizing::new(Vec::new());
         expected_inner_data.push(0x06); // OID of public key type
         encode_primitive_length(&mut expected_inner_data, protocol_bytes.len());
