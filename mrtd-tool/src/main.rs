@@ -159,27 +159,27 @@ fn main() {
     };
     */
 
-    // try reading EF.COM through the encrypted channel
-    let select_com = icao_mrtd::iso7816::apdu::Apdu {
-        header: icao_mrtd::iso7816::apdu::CommandHeader {
-            cla: 0x00,
-            ins: 0xA4, // SELECT
-            p1: 0b000_000_10, // select EF under current DF
-            p2: 0b0000_00_00, // return basic metadata, return first or only occurrence
-        },
-        data: icao_mrtd::iso7816::apdu::Data::BothDataShort {
-            request_data: vec![0x01, 0x1E],
-            response_data_length: 0,
-        },
-    };
-    //match icao_mrtd::iso7816::file::read_file(&mut bac, &select_com) {
-    match icao_mrtd::iso7816::file::read_file(&mut secure_card, &select_com) {
-        Ok(com) => {
-            println!("EF.COM:");
-            icao_mrtd::hexdump(&com);
-        },
-        Err(e) => {
-            panic!("failed to read EF.COM: {}", e);
-        },
-    };
+    for file_index in 1..=16 {
+        let select_file = icao_mrtd::iso7816::apdu::Apdu {
+            header: icao_mrtd::iso7816::apdu::CommandHeader {
+                cla: 0x00,
+                ins: 0xA4, // SELECT
+                p1: 0b000_000_10, // select EF under current DF
+                p2: 0b0000_00_00, // return basic metadata, return first or only occurrence
+            },
+            data: icao_mrtd::iso7816::apdu::Data::BothDataExtended {
+                request_data: vec![0x01, file_index],
+                response_data_length: 0,
+            },
+        };
+        match icao_mrtd::iso7816::file::read_file(&mut secure_card, &select_file) {
+            Ok(bs) => {
+                println!("EF.DG{}:", file_index);
+                icao_mrtd::hexdump(&bs);
+            },
+            Err(e) => {
+                eprintln!("failed to read EF.DG{}: {}", file_index, e);
+            },
+        };
+    }
 }

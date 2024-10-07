@@ -193,6 +193,7 @@ pub enum ReadError {
     UnknownLength,
     ReadCommunication(CommunicationError),
     ReadFailed(apdu::Response),
+    OffsetNotRepresentable(usize),
 }
 impl fmt::Display for ReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -211,6 +212,8 @@ impl fmt::Display for ReadError {
                 => write!(f, "READ BINARY communication failed: {}", e),
             Self::ReadFailed(response)
                 => write!(f, "READ BINARY operation failed with status code 0x{:04X}", response.trailer.to_word()),
+            Self::OffsetNotRepresentable(offset)
+                => write!(f, "offset {} (0x{:X}) cannot be represented", offset, offset),
         }
     }
 }
@@ -224,6 +227,7 @@ impl std::error::Error for ReadError {
             Self::UnknownLength => None,
             Self::ReadCommunication(e) => Some(e),
             Self::ReadFailed(_response) => None,
+            Self::OffsetNotRepresentable(_offset) => None,
         }
     }
 }
@@ -365,22 +369,37 @@ pub fn read_file<SC: SmartCard>(card: &mut SC, select_apdu: &apdu::Apdu) -> Resu
         response_data_length = response_data_length.checked_mul(0x100).expect("length too great");
         response_data_length += u16::from(b);
     }
-    let read_response = card.communicate(
-        &apdu::Apdu {
-            header: apdu::CommandHeader {
-                cla: 0x00,
-                ins: 0xB0, // READ BINARY, offset or short EF identifier
-                p1: 0x00, // offset in curEF, offset 0
-                p2: 0x00, // continued: offset 0
-            },
-            data: apdu::Data::ResponseDataExtended {
-                response_data_length,
-            },
+    let response_data_length_usize: usize = response_data_length.into();
+
+    let mut all_bytes = Vec::with_capacity(response_data_length_usize);
+    while all_bytes.len() < response_data_length_usize {
+        let mut remaining_bytes = response_data_length_usize - all_bytes.len();
+        if remaining_bytes > 0xFF {
+            remaining_bytes = 0;
         }
-    )
-        .map_err(|e| ReadError::ReadCommunication(e))?;
-    if read_response.trailer.to_word() != 0x9000 {
-        return Err(ReadError::ReadFailed(read_response));
+        let remaining_bytes_u8: u8 = remaining_bytes.try_into().unwrap();
+
+        if all_bytes.len() > 0b0111_1111_1111_1111 {
+            return Err(ReadError::OffsetNotRepresentable(all_bytes.len()));
+        }
+        let p1: u8 = ((all_bytes.len() >> 8) & 0b0111_1111).try_into().unwrap();
+        let p2: u8 = ((all_bytes.len() >> 0) & 0b1111_1111).try_into().unwrap();
+        let read_response = card.communicate(
+            &apdu::Apdu {
+                header: apdu::CommandHeader {
+                    cla: 0x00,
+                    ins: 0xB0, // READ BINARY, offset or short EF identifier
+                    p1, // offset in curEF (top bit=0), offset from p1
+                    p2, // continued: offset from p2
+                },
+                data: apdu::Data::ResponseDataShort { response_data_length: remaining_bytes_u8 },
+            }
+        )
+            .map_err(|e| ReadError::ReadCommunication(e))?;
+        if read_response.trailer.to_word() != 0x9000 {
+            return Err(ReadError::ReadFailed(read_response));
+        }
+        all_bytes.extend(read_response.data.as_slice());
     }
-    Ok(read_response.data.clone())
+    Ok(all_bytes)
 }
