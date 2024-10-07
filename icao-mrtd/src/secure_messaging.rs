@@ -125,6 +125,10 @@ pub trait SecureMessagingOperations {
     fn cipher_block_size(&self) -> usize;
 
     /// Block size of the MAC in bytes.
+    ///
+    /// Note that this is only used when establishing Secure Messaging. Once it is established,
+    /// decisions about padding are made depending on
+    /// [`SecureMessagingOperations::cipher_block_size`] instead.
     fn mac_block_size(&self) -> usize;
 
     /// The key derivation function.
@@ -372,6 +376,10 @@ pub trait SecureMessaging<SC: SmartCard> {
     fn cipher_block_size(&self) -> usize;
 
     /// The block size of the underlying MAC algorithm in bytes.
+    ///
+    /// Note that this is only used when establishing Secure Messaging. Once it is established,
+    /// decisions about padding are made depending on [`SecureMessaging::cipher_block_size`]
+    /// instead.
     fn mac_block_size(&self) -> usize;
 
     /// Obtain the underlying smart card for smart-card operations.
@@ -439,7 +447,6 @@ pub trait SecureMessaging<SC: SmartCard> {
 
     fn communicate(&mut self, request: &Apdu) -> Result<Response, CommunicationError> {
         let mut my_request = request.clone();
-        let mac_block_size = self.mac_block_size();
         let cipher_block_size = self.cipher_block_size();
 
         // add secure messaging mark to CLA (header is part of MAC)
@@ -451,10 +458,12 @@ pub trait SecureMessaging<SC: SmartCard> {
             my_request.header.ins,
             my_request.header.p1,
             my_request.header.p2,
-            0x80,
         ]);
-        while padded_header.len() % mac_block_size != 0 {
-            padded_header.push(0x00);
+        if cipher_block_size > 1 {
+            padded_header.push(0x80);
+            while padded_header.len() % cipher_block_size != 0 {
+                padded_header.push(0x00);
+            }
         }
 
         // increment the SSC
@@ -512,10 +521,12 @@ pub trait SecureMessaging<SC: SmartCard> {
 
         // compute the MAC
         mac_data.extend(body_data.as_slice());
-        // add padding
-        mac_data.push(0x80);
-        while mac_data.len() % mac_block_size != 0 {
-            mac_data.push(0x00);
+        if cipher_block_size > 1 {
+            // add padding
+            mac_data.push(0x80);
+            while mac_data.len() % cipher_block_size != 0 {
+                mac_data.push(0x00);
+            }
         }
         // compute MAC
         let mac = self.mac_padded_data(&mac_data);
@@ -597,9 +608,11 @@ pub trait SecureMessaging<SC: SmartCard> {
             data.extend(field.tag_and_length);
             data.extend(field.data);
         }
-        data.push(0x80);
-        while data.len() % mac_block_size != 0 {
-            data.push(0x00);
+        if cipher_block_size > 1 {
+            data.push(0x80);
+            while data.len() % cipher_block_size != 0 {
+                data.push(0x00);
+            }
         }
         if !self.verify_mac_padded_data(&data, received_mac) {
             return Err(Error::ResponseMac.into());
