@@ -2,7 +2,6 @@
 
 
 pub mod asn1;
-pub mod crypt;
 
 
 use std::fmt;
@@ -16,11 +15,11 @@ use sha1::Sha1;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+use crate::crypt::{boxed_uint_from_be_slice, KeyExchange};
 use crate::der_util::{self, encode_primitive_length, oid_to_der_bytes, try_decode_primitive_length};
 use crate::iso7816::apdu::{Apdu, CommandHeader, Data, Response};
 use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::pace::asn1::PaceInfo;
-use crate::pace::crypt::{boxed_uint_from_be_slice, KeyExchange};
 use crate::secure_messaging::{
     SecureMessaging, SecureMessagingOperations, Sm3Des, SmAes128, SmAes192, SmAes256, Smo3Des,
     SmoAes128, SmoAes192, SmoAes256,
@@ -687,9 +686,9 @@ pub fn establish<'sc, SC: SmartCard>(
         PACE_DH_GM_AES_CBC_CMAC_192, PACE_DH_GM_AES_CBC_CMAC_256,
     ) {
         match pace_parameter_id {
-            0 => KeyExchange::DiffieHellman(crate::pace::crypt::dh::params::get_1024_modp_160_po()),
-            1 => KeyExchange::DiffieHellman(crate::pace::crypt::dh::params::get_2048_modp_224_po()),
-            2 => KeyExchange::DiffieHellman(crate::pace::crypt::dh::params::get_2048_modp_256_po()),
+            0 => KeyExchange::DiffieHellman(crate::crypt::dh::params::get_1024_modp_160_po()),
+            1 => KeyExchange::DiffieHellman(crate::crypt::dh::params::get_2048_modp_224_po()),
+            2 => KeyExchange::DiffieHellman(crate::crypt::dh::params::get_2048_modp_256_po()),
             other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }.into()),
         }
     } else if equals_any!(
@@ -699,17 +698,17 @@ pub fn establish<'sc, SC: SmartCard>(
     ) {
         // elliptic-curve Diffie-Hellman
         match pace_parameter_id {
-            8 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p192()),
-            9 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p192r1()),
-            10 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p224()),
-            11 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p224r1()),
-            12 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p256()),
-            13 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p256r1()),
-            14 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p320r1()),
-            15 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p384()),
-            16 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p384r1()),
-            17 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_brainpool_p512r1()),
-            18 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::pace::crypt::elliptic::curves::get_nist_p521()),
+            8 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_nist_p192()),
+            9 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_brainpool_p192r1()),
+            10 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_nist_p224()),
+            11 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_brainpool_p224r1()),
+            12 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_nist_p256()),
+            13 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_brainpool_p256r1()),
+            14 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_brainpool_p320r1()),
+            15 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_nist_p384()),
+            16 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_brainpool_p384r1()),
+            17 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_brainpool_p512r1()),
+            18 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_nist_p521()),
             other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }.into()),
         }
     } else {

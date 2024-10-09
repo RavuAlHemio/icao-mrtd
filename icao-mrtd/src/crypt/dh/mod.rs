@@ -83,7 +83,7 @@ mod tests {
     use super::DiffieHellmanParams;
     use crypto_bigint::BoxedUint;
     use hex_literal::hex;
-    use crate::pace::crypt::boxed_uint_from_be_slice;
+    use crate::crypt::boxed_uint_from_be_slice;
 
     #[test]
     fn wikipedia_example() {

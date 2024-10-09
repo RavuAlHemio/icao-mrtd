@@ -1,7 +1,7 @@
 use hex_literal::hex;
+use icao_mrtd::crypt::{boxed_uint_from_be_slice, KeyExchange};
 use icao_mrtd::iso7816::apdu::{Apdu, Response, ResponseTrailer};
 use icao_mrtd::iso7816::card::SmartCard;
-use icao_mrtd::pace::crypt::{boxed_uint_from_be_slice, KeyExchange};
 use icao_mrtd::pace::PasswordSource;
 use rasn::types::Oid;
 
@@ -132,7 +132,7 @@ fn test_pace_setup_appg1() {
 
     // make it happen
     let key_exchange = KeyExchange::PrimeWeierstrassEllipticDiffieHellman(
-        icao_mrtd::pace::crypt::elliptic::curves::get_brainpool_p256r1(),
+        icao_mrtd::crypt::elliptic::curves::get_brainpool_p256r1(),
     );
     icao_mrtd::pace::perform_gm_kex_with_values(
         &mut card,

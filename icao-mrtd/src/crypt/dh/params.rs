@@ -6,8 +6,8 @@
 
 use hex_literal::hex;
 
-use crate::pace::crypt::boxed_uint_from_be_slice;
-use crate::pace::crypt::dh::DiffieHellmanParams;
+use crate::crypt::boxed_uint_from_be_slice;
+use crate::crypt::dh::DiffieHellmanParams;
 
 
 pub fn get_1024_modp_160_po() -> DiffieHellmanParams {

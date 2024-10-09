@@ -12,7 +12,7 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 use zeroize::Zeroizing;
 use zeroize_derive::ZeroizeOnDrop;
 
-use crate::pace::crypt::boxed_uint_from_be_slice;
+use crate::crypt::boxed_uint_from_be_slice;
 
 
 /// A point in affine coordinates.

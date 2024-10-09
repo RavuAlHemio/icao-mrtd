@@ -1,4 +1,5 @@
 pub mod bac;
+pub mod crypt;
 pub mod der_util;
 pub mod iso7816;
 pub mod mrz;

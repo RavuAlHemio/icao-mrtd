@@ -6,8 +6,8 @@
 
 use hex_literal::hex;
 
-use crate::pace::crypt::boxed_uint_from_be_slice;
-use crate::pace::crypt::elliptic::{AffinePoint, PrimeWeierstrassCurve};
+use crate::crypt::boxed_uint_from_be_slice;
+use crate::crypt::elliptic::{AffinePoint, PrimeWeierstrassCurve};
 
 
 pub fn get_nist_p192() -> PrimeWeierstrassCurve {

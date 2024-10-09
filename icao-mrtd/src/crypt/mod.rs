@@ -1,4 +1,4 @@
-//! Cryptographic functionality for PACE.
+//! Cryptographic functionality.
 
 
 pub mod dh;
@@ -10,8 +10,8 @@ use elliptic::AffinePoint;
 use zeroize::Zeroizing;
 use zeroize_derive::ZeroizeOnDrop;
 
-use crate::pace::crypt::dh::DiffieHellmanParams;
-use crate::pace::crypt::elliptic::PrimeWeierstrassCurve;
+use crate::crypt::dh::DiffieHellmanParams;
+use crate::crypt::elliptic::PrimeWeierstrassCurve;
 
 
 /// A key exchange method.
