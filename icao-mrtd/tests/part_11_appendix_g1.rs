@@ -1,7 +1,7 @@
 use hex_literal::hex;
 use icao_mrtd::iso7816::apdu::{Apdu, Response, ResponseTrailer};
 use icao_mrtd::iso7816::card::SmartCard;
-use icao_mrtd::pace::crypt::boxed_uint_from_be_slice;
+use icao_mrtd::pace::crypt::{boxed_uint_from_be_slice, KeyExchange};
 use icao_mrtd::pace::PasswordSource;
 use rasn::types::Oid;
 
@@ -131,10 +131,13 @@ fn test_pace_setup_appg1() {
         .expect("failed to obtain encrypted nonce");
 
     // make it happen
-    icao_mrtd::pace::perform_gm_kex_weierstrass_ecdh_with_values(
-        &mut card,
-        icao_mrtd::pace::PACE_ECDH_GM_AES_CBC_CMAC_128,
+    let key_exchange = KeyExchange::PrimeWeierstrassEllipticDiffieHellman(
         icao_mrtd::pace::crypt::elliptic::curves::get_brainpool_p256r1(),
+    );
+    icao_mrtd::pace::perform_gm_kex_with_values(
+        &mut card,
+        PROTOCOL,
+        key_exchange,
         icao_mrtd::pace::CipherAndMac::Aes128CipherCmacMac,
         &MRZ_DATA,
         encrypted_nonce.as_slice(),
