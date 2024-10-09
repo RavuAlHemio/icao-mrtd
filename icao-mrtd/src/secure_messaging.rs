@@ -7,8 +7,10 @@ use aes::{Aes128, Aes192, Aes256};
 use block_padding::NoPadding;
 use cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use cmac::{Cmac, KeyInit, Mac};
+use crypto_bigint::{BoxedUint, NonZero};
 use des::{Des, TdesEde2};
 use digest::{Digest, DynDigest};
+use hex_literal::hex;
 use retail_mac::RetailMac;
 use sha1::Sha1;
 use sha2::Sha256;
@@ -164,6 +166,59 @@ pub trait SecureMessagingOperations {
     fn verify_mac_padded_data(&self, data: &[u8], key: &[u8], expected_mac: &[u8]) -> bool {
         let computed_mac = self.mac_padded_data(data, key);
         computed_mac.ct_eq(expected_mac).into()
+    }
+
+    /// The pseudorandom function used for Integrated Mapping.
+    fn integrated_mapping_pseudorandom_function(&self, chip_nonce: &[u8], terminal_nonce: &[u8], prime_order: &BoxedUint) -> Zeroizing<BoxedUint> {
+        const C0_128: [u8; 16] = hex!("a668892a7c41e3ca739f40b057d85904");
+        const C1_128: [u8; 16] = hex!("a4e136ac725f738b01c1f60217c188ad");
+        const C0_256: [u8; 32] = hex!("d463d65234124ef7897054986dca0a174e28df758cbaa03f240616414d5a1676");
+        const C1_256: [u8; 32] = hex!("54bd7255f0aaf831bec3423fcf39d69b6cbf066677d0faae5aadd99df8e53517");
+
+        // first time around, chip_nonce (s) is used as the data and terminal_nonce (t) as the key
+        assert_eq!(terminal_nonce.len(), self.cipher_key_size());
+        assert!(chip_nonce.len() % self.cipher_block_size() == 0);
+
+        // pick out what we feed as data to the next rounds
+        let (c0, c1) = match self.cipher_key_size() {
+            16 => (&C0_128[..], &C1_128[..]), // 128 bits (3DES, AES-128)
+            24|32 => (&C0_256[..], &C1_256[..]), // 192 (AES-192) or 256 bits (AES-256)
+            _ => panic!("unexpected cipher key size"),
+        };
+
+        let zero_iv = vec![0; self.cipher_block_size()];
+
+        // construct initial key by encrypting chip_nonce using terminal_nonce
+        let mut key = Zeroizing::new(chip_nonce.to_vec());
+        self.encrypt_padded_data(key.as_mut_slice(), terminal_nonce, &zero_iv);
+
+        let mut output_buf = Zeroizing::new(Vec::new());
+        let mut n = 0;
+        let chip_nonce_bits = 8 * chip_nonce.len();
+        while n * chip_nonce_bits < usize::try_from(prime_order.bits()).unwrap() + 64 {
+            let round_key = Zeroizing::new(key[0..self.cipher_key_size()].to_vec());
+
+            // top row (key for the next round)
+            key.resize(c0.len(), 0);
+            key.copy_from_slice(c0);
+            self.encrypt_padded_data(&mut key, &round_key, &zero_iv);
+
+            // bottom row (data for the output)
+            let mut data = Zeroizing::new(c1.to_vec());
+            self.encrypt_padded_data(&mut data, &round_key, &zero_iv);
+            output_buf.extend(data.as_slice());
+
+            n += 1;
+        }
+
+        let output_width = u32::try_from(output_buf.len() * 8).unwrap();
+        let ret_width = output_width.max(prime_order.bits());
+        let output_num = BoxedUint::from_be_slice(
+            &output_buf,
+            ret_width,
+        ).expect("failed to assemble result");
+        let ret_num = output_num.rem(&NonZero::new(prime_order.widen(ret_width)).unwrap());
+        Zeroizing::new(ret_num)
     }
 }
 
@@ -924,5 +979,32 @@ impl<'sc, SC: SmartCard> SecureMessaging<SC> for SmAes256<'sc, SC> {
 impl<'sc, SC: SmartCard> SmartCard for SmAes256<'sc, SC> {
     fn communicate(&mut self, request: &Apdu) -> Result<Response, CommunicationError> {
         SecureMessaging::communicate(self, request)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{SecureMessagingOperations, SmoAes128};
+    use hex_literal::hex;
+    use crate::crypt::boxed_uint_from_be_slice;
+    use crate::crypt::elliptic::curves::get_brainpool_p256r1;
+
+    #[test]
+    fn test_integrated_mapping_pseudorandom_function_p11_apph1() {
+        let chip_nonce = hex!("
+            2923BE84 E16CD6AE 529049F1 F1BBE9EB
+        ");
+        let terminal_nonce = hex!("
+            5DD4CBFC 96F5453B 130D890A 1CDBAE32
+        ");
+        let prime_order = get_brainpool_p256r1().prime().clone();
+
+        let result = SmoAes128.integrated_mapping_pseudorandom_function(&chip_nonce, &terminal_nonce, &prime_order);
+        let expected_result = boxed_uint_from_be_slice(&hex!("
+            A2F8FF2D F50E52C6 599F386A DCB595D2
+            29F6A167 ADE2BE5F 2C3296AD D5B7430E
+        "));
+        assert_eq!(&*result, &expected_result);
     }
 }
