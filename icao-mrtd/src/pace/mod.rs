@@ -22,7 +22,7 @@ use crate::iso7816::apdu::{Apdu, CommandHeader, Data, Response};
 use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::pace::asn1::PaceInfo;
 use crate::pace::crypt::boxed_uint_from_be_slice;
-use crate::pace::crypt::dh::{DiffieHellman, DiffieHellmanParams};
+use crate::pace::crypt::dh::DiffieHellmanParams;
 use crate::pace::crypt::elliptic::PrimeWeierstrassCurve;
 use crate::secure_messaging::{
     SecureMessaging, SecureMessagingOperations, Sm3Des, SmAes128, SmAes192, SmAes256, Smo3Des,
@@ -488,12 +488,11 @@ pub fn perform_gm_kex_classic_dh_with_values<'sc, SC: SmartCard>(
 
     // derive the shared secret for generic mapping using classic Diffie-Hellman
     let derivation_shared_secret = {
-        let dh = DiffieHellman::new_with_private_key(params.clone(), derivation_private_key.clone());
-        let public_key = dh.public_key();
+        let public_key = params.calculate_public_key(&derivation_private_key);
         let public_key_bytes = Zeroizing::new(public_key.to_be_bytes());
         let card_public_key_bytes = exchange_mapping_public_keys(card, &public_key_bytes)?;
         let card_public_key = Zeroizing::new(boxed_uint_from_be_slice(&card_public_key_bytes));
-        dh.finalize(&card_public_key)
+        params.diffie_hellman(&derivation_private_key, &card_public_key)
     };
 
     // perform generic mapping on the DH parameters
@@ -501,15 +500,14 @@ pub fn perform_gm_kex_classic_dh_with_values<'sc, SC: SmartCard>(
 
     // second round of key agreement with the new parameters
     let (shared_secret, public_key_bytes, card_public_key_bytes) = {
-        let session_dh = DiffieHellman::new_with_private_key(session_params, session_private_key.clone());
-        let public_key = session_dh.public_key();
+        let public_key = session_params.calculate_public_key(&session_private_key);
         let public_key_bytes = Zeroizing::new(public_key.to_be_bytes());
         let card_public_key_bytes = exchange_ephemeral_public_keys(card, &public_key_bytes)?;
         if public_key_bytes.ct_eq(card_public_key_bytes.as_slice()).into() {
             return Err(Error::DiffieHellmanKeysEqual.into());
         }
         let card_public_key = Zeroizing::new(boxed_uint_from_be_slice(&card_public_key_bytes));
-        let shared_secret = session_dh.finalize(&card_public_key);
+        let shared_secret = session_params.diffie_hellman(&session_private_key, &card_public_key);
         (shared_secret, public_key_bytes, card_public_key_bytes)
     };
     let shared_secret_bytes = Zeroizing::new(shared_secret.to_be_bytes());

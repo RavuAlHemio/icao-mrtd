@@ -6,8 +6,6 @@ pub mod params;
 
 use crypto_bigint::BoxedUint;
 use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
-use rand::RngCore;
-use rand::rngs::OsRng;
 use zeroize::Zeroizing;
 use zeroize_derive::ZeroizeOnDrop;
 
@@ -43,6 +41,24 @@ impl DiffieHellmanParams {
         Self { prime, generator, subgroup_size_bytes }
     }
 
+    /// Calculates a public key from a private key.
+    pub fn calculate_public_key(&self, private_key: &BoxedUint) -> Zeroizing<BoxedUint> {
+        // pubkey = generator ** private_key mod prime
+        let monty_params = BoxedMontyParams::new(self.prime.to_odd().unwrap());
+        let monty_generator = BoxedMontyForm::new(self.generator.clone(), monty_params);
+        let public_key = monty_generator.pow(private_key).retrieve();
+        Zeroizing::new(public_key)
+    }
+
+    /// Derives a secret key from the private key and the other party's public key.
+    pub fn diffie_hellman(&self, private_key: &BoxedUint, other_public_key: &BoxedUint) -> Zeroizing<BoxedUint> {
+        // secret = other_public_key ** private_key mod prime
+        let monty_params = BoxedMontyParams::new(self.prime.to_odd().unwrap());
+        let monty_other_public = BoxedMontyForm::new(other_public_key.clone(), monty_params);
+        let secret = monty_other_public.pow(private_key).retrieve();
+        Zeroizing::new(secret)
+    }
+
     /// Derives new Diffie-Hellman parameters using generic mapping with the given nonce and shared
     /// secret.
     ///
@@ -62,67 +78,9 @@ impl DiffieHellmanParams {
 }
 
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
-pub(crate) struct DiffieHellman {
-    /// The Diffie-Hellman parameters.
-    params: DiffieHellmanParams,
-
-    /// The private key.
-    private_key: BoxedUint,
-}
-impl DiffieHellman {
-    /// Returns a reference to the parameters.
-    pub fn params(&self) -> &DiffieHellmanParams { &self.params }
-
-    /// Creates a new Diffie-Hellman structure with the given parameters as well as a randomly
-    /// generated private key.
-    ///
-    /// The length of the private key matches the subgroup size as provided in the parameters.
-    #[allow(unused)]
-    pub fn new(params: DiffieHellmanParams) -> Self {
-        // generate a private key
-        let mut private_key_bytes = vec![0u8; params.subgroup_size_bytes];
-        OsRng.fill_bytes(private_key_bytes.as_mut_slice());
-        let private_key = BoxedUint::from_be_slice(
-            private_key_bytes.as_slice(),
-            (8 * params.subgroup_size_bytes).try_into().unwrap(),
-        ).unwrap();
-
-        Self::new_with_private_key(params, private_key)
-    }
-
-    /// Creates a new Diffie-Hellman structure with the given parameters and private key.
-    pub fn new_with_private_key(params: DiffieHellmanParams, private_key: BoxedUint) -> Self {
-        Self {
-            params,
-            private_key,
-        }
-    }
-
-    /// Generates the public key for this Diffie-Hellman structure.
-    pub fn public_key(&self) -> Zeroizing<BoxedUint> {
-        // pubkey = generator ** private_key mod prime
-        let monty_params = BoxedMontyParams::new(self.params().prime().to_odd().unwrap());
-        let monty_generator = BoxedMontyForm::new(self.params().generator().clone(), monty_params);
-        let public_key = monty_generator.pow(&self.private_key).retrieve();
-        Zeroizing::new(public_key)
-    }
-
-    /// Derives the secret for this Diffie-Hellman structure given the public key of the other
-    /// party.
-    pub fn finalize(&self, other_public_key: &BoxedUint) -> Zeroizing<BoxedUint> {
-        // secret = other_public_key ** private_key mod prime
-        let monty_params = BoxedMontyParams::new(self.params().prime().to_odd().unwrap());
-        let monty_other_public = BoxedMontyForm::new(other_public_key.clone(), monty_params);
-        let secret = monty_other_public.pow(&self.private_key).retrieve();
-        Zeroizing::new(secret)
-    }
-}
-
-
 #[cfg(test)]
 mod tests {
-    use super::{DiffieHellman, DiffieHellmanParams};
+    use super::DiffieHellmanParams;
     use crypto_bigint::BoxedUint;
     use hex_literal::hex;
     use crate::pace::crypt::boxed_uint_from_be_slice;
@@ -136,16 +94,13 @@ mod tests {
         let alice_private = BoxedUint::from(4u8);
         let bob_private = BoxedUint::from(3u8);
 
-        let alice_dh = DiffieHellman::new_with_private_key(dh_params.clone(), alice_private);
-        let bob_dh = DiffieHellman::new_with_private_key(dh_params.clone(), bob_private);
-
-        let alice_public = alice_dh.public_key();
+        let alice_public = dh_params.calculate_public_key(&alice_private);
         assert_eq!(&*alice_public, &BoxedUint::from(4u8));
-        let bob_public = bob_dh.public_key();
+        let bob_public = dh_params.calculate_public_key(&bob_private);
         assert_eq!(&*bob_public, &BoxedUint::from(10u8));
 
-        let alice_secret = alice_dh.finalize(&bob_public);
-        let bob_secret = bob_dh.finalize(&alice_public);
+        let alice_secret = dh_params.diffie_hellman(&alice_private, &bob_public);
+        let bob_secret = dh_params.diffie_hellman(&bob_private, &alice_public);
         assert_eq!(alice_secret, bob_secret);
         assert_eq!(&*alice_secret, &BoxedUint::from(18u8));
         assert_eq!(&*bob_secret, &BoxedUint::from(18u8));
@@ -184,10 +139,7 @@ mod tests {
             66DDAFEA C1609CB5 B963BB0C B3FF8B3E 047F336C
         "));
 
-        let terminal_dh = DiffieHellman::new_with_private_key(dh_params.clone(), terminal_private);
-        let chip_dh = DiffieHellman::new_with_private_key(dh_params.clone(), chip_private);
-
-        let terminal_public = terminal_dh.public_key();
+        let terminal_public = dh_params.calculate_public_key(&terminal_private);
         assert_eq!(
             &*terminal_public,
             &boxed_uint_from_be_slice(&hex!("
@@ -201,7 +153,7 @@ mod tests {
                 1AFE710F BBBC5F8B A166F431 1975EC6C
             ")),
         );
-        let chip_public = chip_dh.public_key();
+        let chip_public = dh_params.calculate_public_key(&chip_private);
         assert_eq!(
             &*chip_public,
             &boxed_uint_from_be_slice(&hex!("
@@ -216,8 +168,8 @@ mod tests {
             ")),
         );
 
-        let terminal_secret = terminal_dh.finalize(&chip_public);
-        let chip_secret = chip_dh.finalize(&terminal_public);
+        let terminal_secret = dh_params.diffie_hellman(&terminal_private, &chip_public);
+        let chip_secret = dh_params.diffie_hellman(&chip_private, &terminal_public);
         let shared_secret = boxed_uint_from_be_slice(&hex!("
             5BABEBEF 5B74E5BA 94B5C063 FDA15F1F
             1CDE9487 3EE0A5D3 A2FCAB49 F258D07F
