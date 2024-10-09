@@ -113,7 +113,7 @@ impl SmartCard for AppendixG2Card {
 }
 
 #[test]
-fn test_pace_setup_appg1() {
+fn test_pace_setup_appg2() {
     const MRZ_DATA: [u8; 24] = *b"T22000129364081251010318";
     const DERIVATION_PRIVATE_KEY: [u8; 20] = hex!("
         5265030F 751F4AD1 8B08AC56 5FC7AC95 2E41618D

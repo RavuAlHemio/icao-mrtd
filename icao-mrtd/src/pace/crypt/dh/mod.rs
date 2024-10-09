@@ -71,7 +71,7 @@ impl DiffieHellmanParams {
         let generator_monty = BoxedMontyForm::new(self.generator().clone(), monty_params.clone());
         let shared_secret_monty = BoxedMontyForm::new(shared_secret.clone(), monty_params.clone());
 
-        let new_generator_monty = generator_monty.pow(nonce).add(&shared_secret_monty);
+        let new_generator_monty = generator_monty.pow(nonce).mul(&shared_secret_monty);
         let new_generator = new_generator_monty.retrieve();
         Self::new(self.prime().clone(), new_generator, self.subgroup_size_bytes())
     }
