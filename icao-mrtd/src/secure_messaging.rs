@@ -4,9 +4,11 @@
 use std::fmt;
 
 use subtle::ConstantTimeEq;
+use tracing::{debug, instrument};
 use zeroize::Zeroizing;
 use zeroize_derive::ZeroizeOnDrop;
 
+use crate::SliceHexdumper;
 use crate::crypt::cipher_mac::{Cam3Des, CamAes128, CamAes192, CamAes256, CipherAndMac};
 use crate::iso7816::apdu::{Apdu, Data, Response, ResponseTrailer};
 use crate::iso7816::card::{CommunicationError, SmartCard};
@@ -186,6 +188,7 @@ pub trait SecureMessaging {
     /// Drops the secure messaging context and returns the inner smart card.
     fn into_smart_card(self) -> Box<dyn SmartCard>;
 
+    #[instrument(skip(self))]
     fn communicate(&mut self, request: &Apdu) -> Result<Response, CommunicationError> {
         let mut my_request = request.clone();
         let cipher_block_size = self.cipher_block_size();
@@ -375,6 +378,7 @@ pub trait SecureMessaging {
                 return Err(Error::UnknownPadding { padding_mode: actual_response.data[0] }.into());
             }
             let mut encrypted_data = Zeroizing::new(actual_response.data[1..].to_vec());
+            debug!("encrypted data: {}", SliceHexdumper(encrypted_data.as_slice()));
 
             self.decrypt_padded_data(encrypted_data.as_mut_slice());
 
@@ -387,8 +391,7 @@ pub trait SecureMessaging {
             }
             encrypted_data.pop();
 
-            println!("decrypted data:");
-            crate::hexdump(&encrypted_data);
+            debug!("decrypted data: {}", SliceHexdumper(encrypted_data.as_slice()));
             encrypted_data.to_vec()
         };
         let actual_status = received_mac_fields.iter()

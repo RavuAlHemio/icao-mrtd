@@ -1,5 +1,8 @@
 use std::fmt;
 
+use tracing::{debug, instrument};
+
+use crate::SliceHexdumper;
 use crate::iso7816::apdu;
 use crate::pace;
 use crate::secure_messaging;
@@ -55,15 +58,14 @@ pub trait SmartCard {
     fn communicate(&mut self, request: &apdu::Apdu) -> Result<apdu::Response, CommunicationError>;
 }
 impl SmartCard for pcsc::Card {
+    #[instrument(skip(self))]
     fn communicate(&mut self, request: &apdu::Apdu) -> Result<apdu::Response, CommunicationError> {
         let mut out_buf = Vec::new();
         request.write_bytes(&mut out_buf)?;
-        println!("sending to card:");
-        crate::hexdump(&out_buf);
+        debug!("sending to card: {}", SliceHexdumper(&out_buf));
         let mut in_buf = vec![0u8; request.data.response_data_length().unwrap_or(0) + 2];
         let in_slice = self.transmit(&out_buf, &mut in_buf)?;
-        println!("received from card:");
-        crate::hexdump(&in_slice);
+        debug!("received from card: {}", SliceHexdumper(&in_slice));
         apdu::Response::from_slice(in_slice)
             .ok_or(CommunicationError::ShortResponse)
     }

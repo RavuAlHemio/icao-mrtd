@@ -4,6 +4,7 @@ use icao_mrtd::crypt::{boxed_uint_from_be_slice, KeyExchange};
 use icao_mrtd::iso7816::apdu::{Apdu, Response, ResponseTrailer};
 use icao_mrtd::iso7816::card::SmartCard;
 use icao_mrtd::pace::PasswordSource;
+use icao_mrtd::pace::oids::PACE_DH_GM_AES_CBC_CMAC_128;
 use rasn::types::Oid;
 
 
@@ -122,7 +123,7 @@ fn test_pace_setup_appg2() {
     const AGREEMENT_PRIVATE_KEY: [u8; 20] = hex!("
         89CCD99B 0E8D3B1F 11E1296D CA68EC53 411CF2CA
     ");
-    const PROTOCOL: &Oid = icao_mrtd::pace::PACE_DH_GM_AES_CBC_CMAC_128;
+    const PROTOCOL: &Oid = PACE_DH_GM_AES_CBC_CMAC_128;
 
     let mut card: Box<dyn SmartCard> = Box::new(AppendixG2Card::new());
 

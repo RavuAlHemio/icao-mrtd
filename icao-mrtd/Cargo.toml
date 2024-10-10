@@ -24,5 +24,6 @@ sha2 = { version = "0.11.0-pre.4" }
 smallstr = { version = "0.3" }
 smallvec = { version = "1.13", features = ["const_generics"] }
 subtle = { version = "2.6" }
+tracing = { version = "0.1" }
 zeroize = { version = "1.8.1" }
 zeroize_derive = { version = "1.4.2" }

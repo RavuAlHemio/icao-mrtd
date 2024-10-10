@@ -2,6 +2,7 @@
 
 
 pub mod asn1;
+pub mod oids;
 
 
 use std::fmt;
@@ -13,6 +14,7 @@ use rand::rngs::OsRng;
 use rasn::types::{Any, ObjectIdentifier, Oid, SetOf};
 use sha1::Sha1;
 use subtle::ConstantTimeEq;
+use tracing::instrument;
 use zeroize::Zeroizing;
 
 use crate::crypt::{boxed_uint_from_be_slice, KeyExchange};
@@ -21,9 +23,8 @@ use crate::der_util::{self, encode_primitive_length, oid_to_der_bytes, try_decod
 use crate::iso7816::apdu::{Apdu, CommandHeader, Data, Response};
 use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::pace::asn1::PaceInfo;
+use crate::pace::oids::PACE_OID_PREFIX;
 
-
-const PACE_OID_PREFIX: &'static Oid = Oid::const_new(&[0, 4, 0, 127, 0, 7, 2, 2, 4]);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum KeyExchangeKind {
@@ -208,6 +209,7 @@ pub enum PasswordSource {
 }
 
 
+#[instrument]
 fn extract_double_wrapped(operation: Operation, response: Response, outer_tag: u8, inner_tag: u8) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
     if response.data.len() < 4 {
         return Err(Error::ShortResponse {
@@ -242,6 +244,7 @@ fn extract_double_wrapped(operation: Operation, response: Response, outer_tag: u
 }
 
 
+#[instrument(skip(card))]
 pub fn set_authentication_template(card: &mut Box<dyn SmartCard>, mechanism: &Oid, password_source: PasswordSource) -> Result<(), CommunicationError> {
     let mut request_data = Vec::new();
 
@@ -281,6 +284,7 @@ pub fn set_authentication_template(card: &mut Box<dyn SmartCard>, mechanism: &Oi
 }
 
 
+#[instrument(skip(card))]
 pub fn obtain_encrypted_nonce(card: &mut Box<dyn SmartCard>) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
     let request_data = vec![
         0x7C, // dynamic authentication data
@@ -315,6 +319,7 @@ pub fn obtain_encrypted_nonce(card: &mut Box<dyn SmartCard>) -> Result<Zeroizing
 ///
 /// For generic mapping, these are the derivation public keys. For integrated mapping, this is the
 /// terminal nonce sent from the terminal to the chip and the chip answering with empty information.
+#[instrument(skip(card))]
 fn exchange_mapping_values(card: &mut Box<dyn SmartCard>, mapping_values: &[u8]) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
     let mut mapping_data_tlv = Zeroizing::new(vec![0x81]); // mapping data
     encode_primitive_length(&mut mapping_data_tlv, mapping_values.len());
@@ -349,6 +354,7 @@ fn exchange_mapping_values(card: &mut Box<dyn SmartCard>, mapping_values: &[u8])
 }
 
 
+#[instrument(skip(card))]
 fn exchange_ephemeral_public_keys(card: &mut Box<dyn SmartCard>, public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
     let mut mapping_data_tlv = Zeroizing::new(vec![0x83]); // ephemeral pubkey
     encode_primitive_length(&mut mapping_data_tlv, public_key.len());
@@ -383,6 +389,7 @@ fn exchange_ephemeral_public_keys(card: &mut Box<dyn SmartCard>, public_key: &[u
 }
 
 
+#[instrument(skip(card))]
 fn mutual_authentication(card: &mut Box<dyn SmartCard>, outgoing_token: &[u8]) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
     let mut mapping_data_tlv = Zeroizing::new(vec![0x85]); // terminal's token
     encode_primitive_length(&mut mapping_data_tlv, outgoing_token.len());
@@ -458,6 +465,7 @@ fn calculate_mutual_token(
 
 
 /// Performs a generic mapping key exchange using specific values.
+#[instrument(skip(card, cipher_and_mac))]
 pub fn perform_gm_kex_with_values(
     mut card: Box<dyn SmartCard>,
     protocol: &Oid,
@@ -535,6 +543,7 @@ pub fn perform_gm_kex_with_values(
 
 
 /// Performs a generic mapping key exchange.
+#[instrument(skip(card, cipher_and_mac))]
 fn perform_gm_kex(
     card: Box<dyn SmartCard>,
     protocol: &Oid,
@@ -565,6 +574,7 @@ fn perform_gm_kex(
 
 
 /// Performs an integrated mapping key exchange using specific values.
+#[instrument(skip(card, cipher_and_mac))]
 pub fn perform_im_kex_with_values(
     mut card: Box<dyn SmartCard>,
     protocol: &Oid,
@@ -647,6 +657,7 @@ pub fn perform_im_kex_with_values(
 
 
 /// Performs an integrated mapping key exchange.
+#[instrument(skip(card, cipher_and_mac))]
 fn perform_im_kex(
     card: Box<dyn SmartCard>,
     protocol: &Oid,
@@ -680,6 +691,7 @@ fn perform_im_kex(
 /// `card_access` is the data read from the file `EF.CardAccess`; `mrz_data` corresponds to the concatenation of
 /// document number (including check digit), date of birth (including check digit) and date of expiry (including check
 /// digit).
+#[instrument(skip(card))]
 pub fn establish(
     mut card: Box<dyn SmartCard>,
     card_access: &[u8],

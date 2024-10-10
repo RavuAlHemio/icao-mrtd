@@ -1,5 +1,7 @@
 use std::fmt;
 
+use tracing::instrument;
+
 use crate::iso7816::apdu;
 use crate::iso7816::card::{CommunicationError, SmartCard};
 
@@ -344,6 +346,7 @@ pub fn decode_metadata_entries(buf: &[u8]) -> Option<Vec<MetadataEntry>> {
     Some(entries)
 }
 
+#[instrument(skip(card))]
 pub fn read_file(card: &mut Box<dyn SmartCard>, select_apdu: &apdu::Apdu) -> Result<Vec<u8>, ReadError> {
     use crate::iso7816::file::MetadataEntry;
 

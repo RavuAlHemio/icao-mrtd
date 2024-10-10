@@ -6,6 +6,7 @@ use digest::Digest;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha1::Sha1;
+use tracing::instrument;
 
 use crate::crypt::cipher_mac::{Cam3Des, CipherAndMac};
 use crate::iso7816::card::{CommunicationError, SmartCard};
@@ -13,6 +14,7 @@ use crate::iso7816::apdu::{Apdu, CommandHeader, Data};
 use crate::secure_messaging::{Error, MismatchedValue, Operation, Sm3Des};
 
 
+#[instrument(skip(card))]
 fn get_challenge(card: &mut Box<dyn SmartCard>) -> Result<[u8; 8], CommunicationError> {
     let get_challenge_apdu = Apdu {
         header: CommandHeader {
@@ -41,6 +43,7 @@ fn get_challenge(card: &mut Box<dyn SmartCard>) -> Result<[u8; 8], Communication
     Ok(ret)
 }
 
+#[instrument(skip_all)]
 pub fn establish_from_values(
     mut card: Box<dyn SmartCard>,
     k_seed: &[u8],
@@ -146,6 +149,7 @@ pub fn establish_from_values(
     )))
 }
 
+#[instrument(skip(card))]
 pub fn establish(mut card: Box<dyn SmartCard>, mrz_data: &[u8]) -> Result<Box<dyn SmartCard>, CommunicationError> {
     // calculate SHA-1 hash of MRZ data
     let mut sha1 = Sha1::new();
