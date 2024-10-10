@@ -392,6 +392,46 @@ fn mutual_authentication(card: &mut Box<dyn SmartCard>, outgoing_token: &[u8]) -
 }
 
 
+/// Calculates the token used for mutual authentication.
+fn calculate_mutual_token(
+    cipher_and_mac: &Box<dyn CipherAndMac>,
+    protocol: &Oid,
+    public_key_tag: u8,
+    public_key: &[u8],
+    k_session_mac: &[u8],
+) -> Zeroizing<Vec<u8>> {
+    let protocol_bytes = oid_to_der_bytes(protocol);
+
+    // inner structure:
+    // 0x06 LL protocol_oid
+    // keytag LL card_pubkey
+    let mut inner_data = Zeroizing::new(Vec::new());
+    inner_data.push(0x06); // OID (of public key type)
+    encode_primitive_length(&mut inner_data, protocol_bytes.len());
+    inner_data.extend(&protocol_bytes);
+    inner_data.push(public_key_tag);
+    encode_primitive_length(&mut inner_data, public_key.len());
+    inner_data.extend(public_key);
+
+    // outer structure:
+    // 0x7F_0x49 LL inner_data
+    let mut outer_data = Zeroizing::new(Vec::new());
+    outer_data.extend(&[0x7F, 0x49]); // ASN.1 public key
+    encode_primitive_length(&mut outer_data, inner_data.len());
+    outer_data.extend(inner_data.as_slice());
+
+    if cipher_and_mac.mac_block_size() > 1 {
+        // padding
+        outer_data.push(0x80);
+        while outer_data.len() & cipher_and_mac.mac_block_size() != 0 {
+            outer_data.push(0x00);
+        }
+    }
+
+    cipher_and_mac.mac_padded_data(&outer_data, &k_session_mac)
+}
+
+
 /// Performs a generic mapping key exchange using specific values.
 pub fn perform_gm_kex_with_values(
     mut card: Box<dyn SmartCard>,
@@ -438,63 +478,20 @@ pub fn perform_gm_kex_with_values(
     let k_session_mac = cipher_and_mac.derive_mac_key(&shared_secret_bytes);
 
     // mutual authentication
-    let protocol_bytes = oid_to_der_bytes(&protocol);
-
-    let outgoing_token = {
-        // 0x06 LL protocol_oid keytag LL card_pubkey
-        let mut outgoing_inner_data = Zeroizing::new(Vec::new());
-        outgoing_inner_data.push(0x06); // OID of public key type
-        encode_primitive_length(&mut outgoing_inner_data, protocol_bytes.len());
-        outgoing_inner_data.extend(&protocol_bytes);
-        outgoing_inner_data.push(key_exchange.public_key_tag());
-        encode_primitive_length(&mut outgoing_inner_data, card_public_key_bytes.len());
-        outgoing_inner_data.extend(card_public_key_bytes.as_slice());
-
-        // 0x7F_0x49 LL inner_data
-        let mut outgoing_outer_data = Zeroizing::new(Vec::new());
-        outgoing_outer_data.extend(&[0x7F, 0x49]); // ASN.1 public key
-        encode_primitive_length(&mut outgoing_outer_data, outgoing_inner_data.len());
-        outgoing_outer_data.extend(outgoing_inner_data.as_slice());
-
-        if cipher_and_mac.mac_block_size() > 1 {
-            // padding
-            outgoing_outer_data.push(0x80);
-            while outgoing_outer_data.len() % cipher_and_mac.mac_block_size() != 0 {
-                outgoing_outer_data.push(0x00);
-            }
-        }
-
-        cipher_and_mac.mac_padded_data(&outgoing_outer_data, &k_session_mac)
-    };
-
-    let expected_token = {
-        // 0x06 LL protocol_oid 0x84 LL my_pubkey
-        let mut expected_inner_data = Zeroizing::new(Vec::new());
-        expected_inner_data.push(0x06); // OID of public key type
-        encode_primitive_length(&mut expected_inner_data, protocol_bytes.len());
-        expected_inner_data.extend(&protocol_bytes);
-        expected_inner_data.push(key_exchange.public_key_tag());
-        encode_primitive_length(&mut expected_inner_data, public_key_bytes.len());
-        expected_inner_data.extend(&*public_key_bytes);
-
-        // 0x7F_0x49 LL inner_data
-        let mut expected_outer_data = Zeroizing::new(Vec::new());
-        expected_outer_data.extend(&[0x7F, 0x49]); // ASN.1 public key
-        encode_primitive_length(&mut expected_outer_data, expected_inner_data.len());
-        expected_outer_data.extend(expected_inner_data.as_slice());
-
-        if cipher_and_mac.mac_block_size() > 1 {
-            // padding
-            expected_outer_data.push(0x80);
-            while expected_outer_data.len() % cipher_and_mac.mac_block_size() != 0 {
-                expected_outer_data.push(0x00);
-            }
-        }
-
-        cipher_and_mac.mac_padded_data(&expected_outer_data, &k_session_mac)
-    };
-
-    // mutual authentication
+    let outgoing_token = calculate_mutual_token(
+        cipher_and_mac,
+        protocol,
+        key_exchange.public_key_tag(),
+        &card_public_key_bytes,
+        &k_session_mac,
+    );
+    let expected_token = calculate_mutual_token(
+        cipher_and_mac,
+        protocol,
+        key_exchange.public_key_tag(),
+        &public_key_bytes,
+        &k_session_mac,
+    );
     let incoming_token = mutual_authentication(&mut card, &outgoing_token)?;
     if !bool::from(incoming_token.ct_eq(&expected_token)) {
         return Err(Error::MutualAuthentication.into());
