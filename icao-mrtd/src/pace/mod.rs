@@ -23,52 +23,73 @@ use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::pace::asn1::PaceInfo;
 
 
-macro_rules! pace_oids {
-    ($($name:ident => $($num:literal),+ $(,)?);+ $(;)?) => {
-        $(
-            pub const $name: &'static Oid = Oid::const_new(&[0, 4, 0, 127, 0, 7, 2, 2, 4, $($num),+]);
-        )+
-    };
+const PACE_OID_PREFIX: &'static Oid = Oid::const_new(&[0, 4, 0, 127, 0, 7, 2, 2, 4]);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum KeyExchangeKind {
+    DiffieHellman,
+    EllipticCurveDiffieHellman,
 }
 
-pace_oids! {
-    PACE_DH_GM_3DES_CBC_CBC => 1, 1;
-    PACE_DH_GM_AES_CBC_CMAC_128 => 1, 2;
-    PACE_DH_GM_AES_CBC_CMAC_192 => 1, 3;
-    PACE_DH_GM_AES_CBC_CMAC_256 => 1, 4;
-
-    PACE_ECDH_GM_3DES_CBC_CBC => 2, 1;
-    PACE_ECDH_GM_AES_CBC_CMAC_128 => 2, 2;
-    PACE_ECDH_GM_AES_CBC_CMAC_192 => 2, 3;
-    PACE_ECDH_GM_AES_CBC_CMAC_256 => 2, 4;
-
-    PACE_DH_IM_3DES_CBC_CBC => 3, 1;
-    PACE_DH_IM_AES_CBC_CMAC_128 => 3, 2;
-    PACE_DH_IM_AES_CBC_CMAC_192 => 3, 3;
-    PACE_DH_IM_AES_CBC_CMAC_256 => 3, 4;
-
-    PACE_ECDH_IM_3DES_CBC_CBC => 4, 1;
-    PACE_ECDH_IM_AES_CBC_CMAC_128 => 4, 2;
-    PACE_ECDH_IM_AES_CBC_CMAC_192 => 4, 3;
-    PACE_ECDH_IM_AES_CBC_CMAC_256 => 4, 4;
-
-    PACE_ECDH_CAM_AES_CBC_CMAC_128 => 6, 2;
-    PACE_ECDH_CAM_AES_CBC_CMAC_192 => 6, 3;
-    PACE_ECDH_CAM_AES_CBC_CMAC_256 => 6, 4;
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum MappingKind {
+    Generic,
+    Integrated,
+    ChipAuthentication,
 }
 
-pub const PACE_PROTOCOL_OIDS: [&'static Oid; 19] = [
-    PACE_DH_GM_3DES_CBC_CBC, PACE_DH_GM_AES_CBC_CMAC_128,
-    PACE_DH_GM_AES_CBC_CMAC_192, PACE_DH_GM_AES_CBC_CMAC_256,
-    PACE_ECDH_GM_3DES_CBC_CBC, PACE_ECDH_GM_AES_CBC_CMAC_128,
-    PACE_ECDH_GM_AES_CBC_CMAC_192, PACE_ECDH_GM_AES_CBC_CMAC_256,
-    PACE_DH_IM_3DES_CBC_CBC, PACE_DH_IM_AES_CBC_CMAC_128,
-    PACE_DH_IM_AES_CBC_CMAC_192, PACE_DH_IM_AES_CBC_CMAC_256,
-    PACE_ECDH_IM_3DES_CBC_CBC, PACE_ECDH_IM_AES_CBC_CMAC_128,
-    PACE_ECDH_IM_AES_CBC_CMAC_192, PACE_ECDH_IM_AES_CBC_CMAC_256,
-    PACE_ECDH_CAM_AES_CBC_CMAC_128, PACE_ECDH_CAM_AES_CBC_CMAC_192,
-    PACE_ECDH_CAM_AES_CBC_CMAC_256,
-];
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum CipherKind {
+    ThreeDesCbcCbc,
+    Aes128CbcCmac,
+    Aes192CbcCmac,
+    Aes256CbcCmac,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct PaceProtocol {
+    pub key_exchange: KeyExchangeKind,
+    pub mapping: MappingKind,
+    pub cipher: CipherKind,
+}
+impl PaceProtocol {
+    pub fn try_from_oid(oid: &Oid) -> Option<PaceProtocol> {
+        // OID structure: <pacePrefix>.<kexAndMapping>.<cipherKind>
+        let Some(oid_rest) = oid.strip_prefix(&PACE_OID_PREFIX[..]) else { return None };
+        if oid_rest.len() != 2 {
+            return None;
+        }
+
+        let (key_exchange, mapping) = match oid_rest[0] {
+            1 => (KeyExchangeKind::DiffieHellman, MappingKind::Generic),
+            2 => (KeyExchangeKind::EllipticCurveDiffieHellman, MappingKind::Generic),
+            3 => (KeyExchangeKind::DiffieHellman, MappingKind::Integrated),
+            4 => (KeyExchangeKind::EllipticCurveDiffieHellman, MappingKind::Integrated),
+            // 5 is unused (theoretically chip authentication mapping with classic DH?)
+            6 => (KeyExchangeKind::EllipticCurveDiffieHellman, MappingKind::ChipAuthentication),
+            _ => return None,
+        };
+
+        let cipher = match oid_rest[1] {
+            1 => CipherKind::ThreeDesCbcCbc,
+            2 => CipherKind::Aes128CbcCmac,
+            3 => CipherKind::Aes192CbcCmac,
+            4 => CipherKind::Aes256CbcCmac,
+            _ => return None,
+        };
+
+        // refuse disallowed combinations
+        if mapping == MappingKind::ChipAuthentication && cipher == CipherKind::ThreeDesCbcCbc {
+            return None;
+        }
+
+        Some(PaceProtocol {
+            key_exchange,
+            mapping,
+            cipher,
+        })
+    }
+}
 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -654,13 +675,6 @@ fn perform_im_kex(
 }
 
 
-macro_rules! equals_any {
-    ($template:expr, $option1:expr $(, $options:expr)* $(,)?) => {
-        ($template == $option1 $(|| $template == $options)*)
-    };
-}
-
-
 /// Authenticates with the card using PACE.
 ///
 /// `card_access` is the data read from the file `EF.CardAccess`; `mrz_data` corresponds to the concatenation of
@@ -678,6 +692,7 @@ pub fn establish(
         .map_err(|e| Error::CardAccessDecoding(e))?;
 
     // now try to decode each of its entries as a SEQUENCE OF Any (Vec<Any>)
+    let mut pace_protocol_opt = None;
     let mut pace_info_opt = None;
     let mut unsupported_mapping = None;
     for (entry_index, security_info) in security_infos.to_vec().into_iter().enumerate() {
@@ -693,22 +708,17 @@ pub fn establish(
             // FIXME: return an error instead?
             continue;
         };
-        if !PACE_PROTOCOL_OIDS.contains(&&*security_info_oid) {
+        let Some(pace_protocol) = PaceProtocol::try_from_oid(&security_info_oid) else {
             // not relevant
             continue;
-        }
-        if equals_any!(
-            security_info_oid,
-            PACE_DH_IM_3DES_CBC_CBC, PACE_DH_IM_AES_CBC_CMAC_128,
-            PACE_DH_IM_AES_CBC_CMAC_192, PACE_DH_IM_AES_CBC_CMAC_256,
-            PACE_ECDH_IM_3DES_CBC_CBC, PACE_ECDH_IM_AES_CBC_CMAC_128,
-            PACE_ECDH_IM_AES_CBC_CMAC_192, PACE_ECDH_IM_AES_CBC_CMAC_256,
-            PACE_ECDH_CAM_AES_CBC_CMAC_128, PACE_ECDH_CAM_AES_CBC_CMAC_192,
-            PACE_ECDH_CAM_AES_CBC_CMAC_256,
-        ) {
+        };
+        if pace_protocol.mapping == MappingKind::ChipAuthentication {
+            // we don't support chip authentication, but we know it's a PACE thing
             unsupported_mapping = Some(security_info_oid.clone());
             continue;
         }
+
+        pace_protocol_opt = Some(pace_protocol);
 
         // try to decode the whole thing as a PaceInfo now
         let pace_info: PaceInfo = rasn::der::decode(security_info.as_bytes())
@@ -717,9 +727,9 @@ pub fn establish(
         break;
     }
 
-    let pace_info = match pace_info_opt {
-        Some(pi) => pi,
-        None => {
+    let (pace_protocol, pace_info) = match (pace_protocol_opt, pace_info_opt) {
+        (Some(pp), Some(pi)) => (pp, pi),
+        _ => {
             return Err(
                 match unsupported_mapping {
                     Some(protocol) => Error::MappingNotSupported { protocol },
@@ -735,24 +745,14 @@ pub fn establish(
     let pace_parameter_id = pace_parameter_id_integer.try_into()
         .map_err(|_| Error::CustomParameters)?;
 
-    let key_exchange = if equals_any!(
-        pace_info.protocol,
-        PACE_DH_GM_3DES_CBC_CBC, PACE_DH_GM_AES_CBC_CMAC_128,
-        PACE_DH_GM_AES_CBC_CMAC_192, PACE_DH_GM_AES_CBC_CMAC_256,
-    ) {
-        match pace_parameter_id {
+    let key_exchange = match pace_protocol.key_exchange {
+        KeyExchangeKind::DiffieHellman => match pace_parameter_id {
             0 => KeyExchange::DiffieHellman(crate::crypt::dh::params::get_1024_modp_160_po()),
             1 => KeyExchange::DiffieHellman(crate::crypt::dh::params::get_2048_modp_224_po()),
             2 => KeyExchange::DiffieHellman(crate::crypt::dh::params::get_2048_modp_256_po()),
             other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }.into()),
-        }
-    } else if equals_any!(
-        pace_info.protocol,
-        PACE_ECDH_GM_3DES_CBC_CBC, PACE_ECDH_GM_AES_CBC_CMAC_128,
-        PACE_ECDH_GM_AES_CBC_CMAC_192, PACE_ECDH_GM_AES_CBC_CMAC_256,
-    ) {
-        // elliptic-curve Diffie-Hellman
-        match pace_parameter_id {
+        },
+        KeyExchangeKind::EllipticCurveDiffieHellman => match pace_parameter_id {
             8 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_nist_p192()),
             9 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_brainpool_p192r1()),
             10 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_nist_p224()),
@@ -765,20 +765,13 @@ pub fn establish(
             17 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_brainpool_p512r1()),
             18 => KeyExchange::PrimeWeierstrassEllipticDiffieHellman(crate::crypt::elliptic::curves::get_nist_p521()),
             other => return Err(Error::IncompatibleProtocolParameter { protocol: pace_info.protocol, parameter: other }.into()),
-        }
-    } else {
-        unreachable!()
+        },
     };
-    let cipher_and_mac: Box<dyn CipherAndMac> = if equals_any!(pace_info.protocol, PACE_DH_GM_3DES_CBC_CBC, PACE_ECDH_GM_3DES_CBC_CBC) {
-        Box::new(Cam3Des)
-    } else if equals_any!(pace_info.protocol, PACE_DH_GM_AES_CBC_CMAC_128, PACE_ECDH_GM_AES_CBC_CMAC_128) {
-        Box::new(CamAes128)
-    } else if equals_any!(pace_info.protocol, PACE_DH_GM_AES_CBC_CMAC_192, PACE_ECDH_GM_AES_CBC_CMAC_192) {
-        Box::new(CamAes192)
-    } else if equals_any!(pace_info.protocol, PACE_DH_GM_AES_CBC_CMAC_256, PACE_ECDH_GM_AES_CBC_CMAC_256) {
-        Box::new(CamAes256)
-    } else {
-        unreachable!()
+    let cipher_and_mac: Box<dyn CipherAndMac> = match pace_protocol.cipher {
+        CipherKind::ThreeDesCbcCbc => Box::new(Cam3Des),
+        CipherKind::Aes128CbcCmac => Box::new(CamAes128),
+        CipherKind::Aes192CbcCmac => Box::new(CamAes192),
+        CipherKind::Aes256CbcCmac => Box::new(CamAes256),
     };
 
     // choose the encryption method
@@ -787,7 +780,13 @@ pub fn establish(
     // obtain the encrypted nonce from the chip
     let nonce_data = obtain_encrypted_nonce(&mut card)?;
 
-    perform_gm_kex(
-        card, &pace_info.protocol, key_exchange, &cipher_and_mac, mrz_data, &nonce_data,
-    )
+    match pace_protocol.mapping {
+        MappingKind::Generic => perform_gm_kex(
+            card, &pace_info.protocol, key_exchange, &cipher_and_mac, mrz_data, &nonce_data,
+        ),
+        MappingKind::Integrated => perform_im_kex(
+            card, &pace_info.protocol, key_exchange, &cipher_and_mac, mrz_data, &nonce_data,
+        ),
+        MappingKind::ChipAuthentication => unreachable!(),
+    }
 }
