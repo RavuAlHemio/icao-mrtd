@@ -1,4 +1,5 @@
 use hex_literal::hex;
+use icao_mrtd::crypt::cipher_mac::CipherAndMac;
 use icao_mrtd::crypt::{boxed_uint_from_be_slice, KeyExchange};
 use icao_mrtd::iso7816::apdu::{Apdu, Response, ResponseTrailer};
 use icao_mrtd::iso7816::card::SmartCard;
@@ -123,7 +124,7 @@ fn test_pace_setup_appg2() {
     ");
     const PROTOCOL: &Oid = icao_mrtd::pace::PACE_DH_GM_AES_CBC_CMAC_128;
 
-    let mut card = AppendixG2Card::new();
+    let mut card: Box<dyn SmartCard> = Box::new(AppendixG2Card::new());
 
     let derivation_private_key = boxed_uint_from_be_slice(&DERIVATION_PRIVATE_KEY);
     let agreement_private_key = boxed_uint_from_be_slice(&AGREEMENT_PRIVATE_KEY);
@@ -140,11 +141,12 @@ fn test_pace_setup_appg2() {
     let key_exchange = KeyExchange::DiffieHellman(
         icao_mrtd::crypt::dh::params::get_1024_modp_160_po(),
     );
+    let cipher_and_mac: Box<dyn CipherAndMac> = Box::new(icao_mrtd::crypt::cipher_mac::CamAes128);
     icao_mrtd::pace::perform_gm_kex_with_values(
-        &mut card,
+        card,
         PROTOCOL,
         key_exchange,
-        icao_mrtd::pace::CipherAndMac::Aes128CipherCmacMac,
+        &cipher_and_mac,
         &MRZ_DATA,
         encrypted_nonce.as_slice(),
         &derivation_private_key,

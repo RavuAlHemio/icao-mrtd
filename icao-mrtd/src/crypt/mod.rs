@@ -1,6 +1,7 @@
 //! Cryptographic functionality.
 
 
+pub mod cipher_mac;
 pub mod dh;
 pub mod elliptic;
 

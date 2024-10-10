@@ -28,7 +28,7 @@ struct ReadOpts {
 ///
 /// If BAC is to be used, this must happen before BAC is established. If PACE is to be used, this
 /// can only be used after PACE is established.
-fn select_emrtd<SC: SmartCard>(card: &mut SC) {
+fn select_emrtd(card: &mut Box<dyn SmartCard>) {
     let select_emrtd_app = icao_mrtd::iso7816::apdu::Apdu {
         header: icao_mrtd::iso7816::apdu::CommandHeader {
             cla: 0x00,
@@ -60,7 +60,7 @@ fn main() {
     let mut readers = ctx.list_readers(&mut readers_buf)
         .expect("failed to list PC/SC readers");
 
-    let (mrz_string, mut card, use_bac) = match mode {
+    let (mrz_string, card_inner, use_bac) = match mode {
         Mode::ListReaders => {
             for (i, reader) in readers.enumerate() {
                 println!("{}: {:?}", i, reader);
@@ -83,6 +83,7 @@ fn main() {
             }
         },
     };
+    let mut card: Box<dyn SmartCard> = Box::new(card_inner);
 
     // parse the MRZ
     let mrz: icao_mrtd::mrz::Data = mrz_string.parse()
@@ -117,15 +118,14 @@ fn main() {
         Err(e) => panic!("failed to read EF.CardAccess: {}", e),
     };
 
-    let mut secure_card = if use_bac {
+    let mut secure_card: Box<dyn SmartCard> = if use_bac {
         // select eMRTD Application (prerequisite for BAC)
         select_emrtd(&mut card);
 
-        let bac = icao_mrtd::bac::establish(&mut card, mrz.mrz_key().as_bytes())
-            .expect("failed to establish BAC");
-        Box::new(bac)
+        icao_mrtd::bac::establish(card, mrz.mrz_key().as_bytes())
+            .expect("failed to establish BAC")
     } else {
-        let mut pace = icao_mrtd::pace::establish(&mut card, &card_access, mrz.mrz_key().as_bytes())
+        let mut pace: Box<dyn SmartCard> = icao_mrtd::pace::establish(card, &card_access, mrz.mrz_key().as_bytes())
             .expect("failed to establish PACE");
 
         // select eMRTD Application (may only happen after establishing PACE)

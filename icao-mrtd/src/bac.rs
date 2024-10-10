@@ -7,14 +7,13 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use sha1::Sha1;
 
+use crate::crypt::cipher_mac::{Cam3Des, CipherAndMac};
 use crate::iso7816::card::{CommunicationError, SmartCard};
 use crate::iso7816::apdu::{Apdu, CommandHeader, Data};
-use crate::secure_messaging::{
-    Error, MismatchedValue, Operation, SecureMessagingOperations, Sm3Des, Smo3Des,
-};
+use crate::secure_messaging::{Error, MismatchedValue, Operation, Sm3Des};
 
 
-fn get_challenge<SC: SmartCard>(card: &mut SC) -> Result<[u8; 8], CommunicationError> {
+fn get_challenge(card: &mut Box<dyn SmartCard>) -> Result<[u8; 8], CommunicationError> {
     let get_challenge_apdu = Apdu {
         header: CommandHeader {
             cla: 0x00,
@@ -42,17 +41,17 @@ fn get_challenge<SC: SmartCard>(card: &mut SC) -> Result<[u8; 8], CommunicationE
     Ok(ret)
 }
 
-pub fn establish_from_values<'c, SC: SmartCard>(
-    card: &'c mut SC,
+pub fn establish_from_values(
+    mut card: Box<dyn SmartCard>,
     k_seed: &[u8],
     rnd_ic: &[u8],
     rnd_ifd: &[u8],
     k_ifd: &[u8],
-) -> Result<Sm3Des<'c, SC>, CommunicationError> {
+) -> Result<Box<dyn SmartCard>, CommunicationError> {
     // derive the keys
     // (the key derivation functions have remained the same with PACE)
-    let k_enc = Smo3Des.derive_encryption_key(k_seed);
-    let k_mac = Smo3Des.derive_mac_key(k_seed);
+    let k_enc = Cam3Des.derive_encryption_key(k_seed);
+    let k_mac = Cam3Des.derive_mac_key(k_seed);
 
     // concatenate the three values
     let mut ext_auth_data = [0u8; 32+8];
@@ -62,13 +61,13 @@ pub fn establish_from_values<'c, SC: SmartCard>(
 
     // encrypt with an all-zeroes IV and no padding
     let iv = [0u8; 8];
-    debug_assert_eq!(32 % Smo3Des.cipher_block_size(), 0);
-    Smo3Des.encrypt_padded_data(&mut ext_auth_data[0..32], &k_enc, &iv);
+    debug_assert_eq!(32 % Cam3Des.cipher_block_size(), 0);
+    Cam3Des.encrypt_padded_data(&mut ext_auth_data[0..32], &k_enc, &iv);
     // ext_auth_data[0..32] is now encrypted
 
     // pad according to ISO 7816, then generate MAC
     Iso7816::raw_pad(&mut ext_auth_data, 32);
-    let mac = Smo3Des.mac_padded_data(ext_auth_data.as_slice(), &k_mac);
+    let mac = Cam3Des.mac_padded_data(ext_auth_data.as_slice(), &k_mac);
     // MAC fits right where the padding was
     ext_auth_data[32..32+8].copy_from_slice(mac.as_slice());
 
@@ -104,13 +103,13 @@ pub fn establish_from_values<'c, SC: SmartCard>(
     let mut response_data_to_verify = [0u8; 32+8];
     response_data_to_verify[0..32].copy_from_slice(&ext_auth_response.data[0..32]);
     Iso7816::raw_pad(&mut response_data_to_verify, 32);
-    if !Smo3Des.verify_mac_padded_data(&response_data_to_verify, &k_mac, &ext_auth_response.data[32..32+8]) {
+    if !Cam3Des.verify_mac_padded_data(&response_data_to_verify, &k_mac, &ext_auth_response.data[32..32+8]) {
         return Err(Error::ResponseMac.into());
     }
 
     // decrypt
     let iv = [0u8; 8];
-    Smo3Des.decrypt_padded_data(&mut ext_auth_response.data[0..32], &k_enc, &iv);
+    Cam3Des.decrypt_padded_data(&mut ext_auth_response.data[0..32], &k_enc, &iv);
     let decrypted_slice = &ext_auth_response.data[0..32];
 
     let mut rnd_ic_second = [0u8; 8];
@@ -132,22 +131,22 @@ pub fn establish_from_values<'c, SC: SmartCard>(
         *kss = *kifd ^ *kic;
     }
 
-    let k_session_enc = Smo3Des.derive_encryption_key(&k_session_seed);
-    let k_session_mac = Smo3Des.derive_mac_key(&k_session_seed);
+    let k_session_enc = Cam3Des.derive_encryption_key(&k_session_seed);
+    let k_session_mac = Cam3Des.derive_mac_key(&k_session_seed);
 
     let mut send_sequence_counter = [0u8; 8];
     send_sequence_counter[0..4].copy_from_slice(&rnd_ic[4..8]);
     send_sequence_counter[4..8].copy_from_slice(&rnd_ifd[4..8]);
 
-    Ok(Sm3Des::new(
+    Ok(Box::new(Sm3Des::new(
         card,
         k_session_enc.as_slice().try_into().unwrap(),
         k_session_mac.as_slice().try_into().unwrap(),
         send_sequence_counter,
-    ))
+    )))
 }
 
-pub fn establish<'c, SC: SmartCard>(card: &'c mut SC, mrz_data: &[u8]) -> Result<Sm3Des<'c, SC>, CommunicationError> {
+pub fn establish(mut card: Box<dyn SmartCard>, mrz_data: &[u8]) -> Result<Box<dyn SmartCard>, CommunicationError> {
     // calculate SHA-1 hash of MRZ data
     let mut sha1 = Sha1::new();
     Digest::update(&mut sha1, mrz_data);
@@ -155,7 +154,7 @@ pub fn establish<'c, SC: SmartCard>(card: &'c mut SC, mrz_data: &[u8]) -> Result
     let k_seed = &sha1_hash[0..16];
 
     // obtain the challenge
-    let rnd_ic = get_challenge(card)?;
+    let rnd_ic = get_challenge(&mut card)?;
 
     // generate some random bytes
     let mut rnd_ifd = [0u8; 8];

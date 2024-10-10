@@ -86,9 +86,9 @@ fn test_bac_setup_appd() {
     const DECRYPTED_READ_4: [u8; 4] = hex!("60145F01");
     const DECRYPTED_READ_REST: [u8; 18] = hex!("04303130365F36063034303030305C026175");
 
-    let mut card = AppendixDCard::new();
+    let card: Box<dyn SmartCard> = Box::new(AppendixDCard::new());
     let mut bac_card = icao_mrtd::bac::establish_from_values(
-        &mut card,
+        card,
         &K_SEED,
         &AppendixDCard::RND_IC,
         &RND_IFD,

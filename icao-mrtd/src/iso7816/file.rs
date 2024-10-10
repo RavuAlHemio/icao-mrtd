@@ -344,7 +344,7 @@ pub fn decode_metadata_entries(buf: &[u8]) -> Option<Vec<MetadataEntry>> {
     Some(entries)
 }
 
-pub fn read_file<SC: SmartCard>(card: &mut SC, select_apdu: &apdu::Apdu) -> Result<Vec<u8>, ReadError> {
+pub fn read_file(card: &mut Box<dyn SmartCard>, select_apdu: &apdu::Apdu) -> Result<Vec<u8>, ReadError> {
     use crate::iso7816::file::MetadataEntry;
 
     // select the file
