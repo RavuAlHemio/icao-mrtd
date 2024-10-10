@@ -6,7 +6,7 @@ pub mod curves;
 
 use std::ops::{Add, Mul};
 
-use crypto_bigint::{BoxedUint, Integer};
+use crypto_bigint::{BoxedUint, Integer, NonZero};
 use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 use zeroize::Zeroizing;
@@ -113,7 +113,13 @@ pub struct PrimeWeierstrassCurve {
     /// The coordinates of the generator point of the curve.
     generator: AffinePoint,
 
-    // we don't store q or h
+    /// The cofactor of the curve.
+    ///
+    /// A cofactor n means that only each nth point on the curve is part of the group. In practice,
+    /// this means that values like secret keys must be divisible by the cofactor.
+    cofactor: u8,
+
+    // we don't store q
 }
 impl PrimeWeierstrassCurve {
     pub fn new(
@@ -121,6 +127,7 @@ impl PrimeWeierstrassCurve {
         coefficient_a: BoxedUint,
         coefficient_b: BoxedUint,
         generator: AffinePoint,
+        cofactor: u8,
     ) -> Self {
         if !bool::from(prime.is_odd()) {
             panic!("prime is not odd");
@@ -131,6 +138,7 @@ impl PrimeWeierstrassCurve {
             coefficient_a,
             coefficient_b,
             generator,
+            cofactor,
         };
         if !bool::from(curve.is_on_curve_affine(&curve.generator)) {
             panic!("generator is not on curve");
@@ -142,6 +150,7 @@ impl PrimeWeierstrassCurve {
     pub fn coefficient_a(&self) -> &BoxedUint { &self.coefficient_a }
     pub fn coefficient_b(&self) -> &BoxedUint { &self.coefficient_b }
     pub fn generator(&self) -> &AffinePoint { &self.generator }
+    pub fn cofactor(&self) -> u8 { self.cofactor }
 
     /// Calculates the number of bytes a private key used with this curve should have.
     pub fn private_key_len_bytes(&self) -> usize {
@@ -451,7 +460,79 @@ impl PrimeWeierstrassCurve {
             coefficient_a: self.coefficient_a.clone(),
             coefficient_b: self.coefficient_b.clone(),
             generator: new_generator,
+            cofactor: self.cofactor,
         }
+    }
+
+    /// Derives a new generator using integrated mapping from the given pseudorandom function result.
+    pub fn derive_integrated_mapping_generator(&self, pseudorandom_result: &BoxedUint) -> AffinePoint {
+        let two = BoxedUint::from_be_slice(&[0x02], self.prime.bits_precision()).unwrap();
+        let three = BoxedUint::from_be_slice(&[0x03], self.prime.bits_precision()).unwrap();
+        let four_non_zero = NonZero::new(BoxedUint::from_be_slice(&[0x04], self.prime.bits_precision()).unwrap()).unwrap();
+        if !bool::from(self.prime.rem(&four_non_zero).ct_eq(&three)) {
+            panic!("can only derive point if p == 3 (mod 4)");
+        }
+
+        let monty = self.monty_knowledge();
+        let pseudorandom_monty = BoxedMontyForm::new(pseudorandom_result.clone(), monty.params.clone());
+        let one_monty = BoxedMontyForm::one(monty.params.clone());
+        let prime_minus_two = self.prime() - &two;
+
+        // step 1
+        let alpha = pseudorandom_monty.square().neg();
+
+        // step 2 (see implementation note)
+        let minus_b = (&monty.b).neg();
+        let alpha_plus_alpha_squared = (&alpha).add(&alpha.square());
+        let one_plus_alpha_plus_alpha_squared = (&one_monty).add(&alpha_plus_alpha_squared);
+        let a_times_alpha_plus_alpha_squared = (&monty.a).mul(&alpha_plus_alpha_squared);
+        let powered = a_times_alpha_plus_alpha_squared.pow(&prime_minus_two);
+        let x2 = (&minus_b).mul(&one_plus_alpha_plus_alpha_squared).mul(&powered);
+
+        // step 3
+        let x3 = (&alpha).mul(&x2);
+
+        // step 4
+        let a_mul_x2 = (&monty.a).mul(&x2);
+        let h2 = (&x2).pow(&three).add(&a_mul_x2).add(&monty.b);
+
+        // step 5
+        //let a_mul_x3 = (&monty.a).mul(&x3);
+        //let h3 = (&x3).pow(&three).add(a_mul_x3).add(&monty.b);
+
+        // step 6
+        let u = (&pseudorandom_monty).pow(&three).mul(&h2);
+
+        // step 7
+        let prime_plus_one_by_four = (self.prime() + &BoxedUint::one()) / (&four_non_zero);
+        let prime_minus_one_minus_ppobf = self.prime() - &BoxedUint::one() - &prime_plus_one_by_four;
+        let a = h2.pow(&prime_minus_one_minus_ppobf);
+
+        // step 8
+        let aah2 = (&a).square().mul(&h2);
+        let mut point = if aah2 == one_monty {
+            MontyProjectivePoint::new(
+                x2,
+                &a * &h2,
+                one_monty.clone(),
+            )
+        } else {
+            MontyProjectivePoint::new(
+                x3,
+                &a * &u,
+                one_monty.clone(),
+            )
+        };
+
+        if self.cofactor != 1 {
+            let cofactor_big = BoxedUint::from_be_slice(&[self.cofactor], self.prime.bits_precision()).unwrap();
+            point = self.internal_multiply_scalar_with_point(&monty, &cofactor_big, &point);
+        }
+        let (x, y) = Self::internal_monty_projective_to_affine(&point).unwrap();
+        AffinePoint::new(
+            x.retrieve(),
+            y.retrieve(),
+        )
     }
 }
 
@@ -497,6 +578,7 @@ mod tests {
             coefficient_a.clone(),
             coefficient_b.clone(),
             generator.clone(),
+            1,
         );
 
         // obtain nonce
@@ -629,5 +711,55 @@ mod tests {
         "));
         assert_eq!(session_terminal_secret.x, session_shared_secret);
         assert_eq!(session_chip_secret.x, session_shared_secret);
+    }
+
+    #[test]
+    fn icao_doc9303_part11_sech1_example() {
+        // elliptic-curve Diffie-Hellman
+        // the curve is Brainpool p256r1
+        let prime = boxed_uint_from_be_slice(&hex!("
+            A9FB57DB A1EEA9BC 3E660A90 9D838D72
+            6E3BF623 D5262028 2013481D 1F6E5377
+        "));
+        let coefficient_a = boxed_uint_from_be_slice(&hex!("
+            7D5A0975 FC2C3057 EEF67530 417AFFE7
+            FB8055C1 26DC5C6C E94A4B44 F330B5D9
+        "));
+        let coefficient_b = boxed_uint_from_be_slice(&hex!("
+            26DC5C6C E94A4B44 F330B5D9 BBD77CBF
+            95841629 5CF7E1CE 6BCCDC18 FF8C07B6
+        "));
+        let generator_x = boxed_uint_from_be_slice(&hex!("
+            8BD2AEB9 CB7E57CB 2C4B482F FC81B7AF
+            B9DE27E1 E3BD23C2 3A4453BD 9ACE3262
+        "));
+        let generator_y = boxed_uint_from_be_slice(&hex!("
+            547EF835 C3DAC4FD 97F8461A 14611DC9
+            C2774513 2DED8E54 5C1D54C7 2F046997
+        "));
+        let generator = AffinePoint::new(generator_x, generator_y);
+        let curve = PrimeWeierstrassCurve::new(
+            prime.clone(),
+            coefficient_a.clone(),
+            coefficient_b.clone(),
+            generator.clone(),
+            1,
+        );
+
+        let pseudorandom_result = boxed_uint_from_be_slice(&hex!("
+            A2F8FF2D F50E52C6 599F386A DCB595D2
+            29F6A167 ADE2BE5F 2C3296AD D5B7430E
+        "));
+        let new_generator = curve.derive_integrated_mapping_generator(&pseudorandom_result);
+        let new_generator_x = boxed_uint_from_be_slice(&hex!("
+            8E82D315 59ED0FDE 92A4D049 8ADD3C23
+            BABA94FB 77691E31 E90AEA77 FB17D427
+        "));
+        let new_generator_y = boxed_uint_from_be_slice(&hex!("
+            4C1AE14B D0C3DBAC 0C871B7F 36081693
+            64437CA3 0AC243A0 89D3F266 C1E60FAD
+        "));
+        assert_eq!(new_generator.x(), &new_generator_x);
+        assert_eq!(new_generator.y(), &new_generator_y);
     }
 }

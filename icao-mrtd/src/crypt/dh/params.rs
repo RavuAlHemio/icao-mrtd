@@ -28,7 +28,9 @@ pub fn get_1024_modp_160_po() -> DiffieHellmanParams {
             D662A4D1 8E73AFA3 2D779D59 18D08BC8 858F4DCE F97C2A24
             855E6EEB 22B3B2E5
         ")),
-        subgroup_size_bytes: 160/8,
+        subgroup_size: boxed_uint_from_be_slice(&hex!("
+            F518AA87 81A8DF27 8ABA4E7D 64B7CB9D 49462353
+        ")),
     }
 }
 
@@ -60,7 +62,10 @@ pub fn get_2048_modp_224_po() -> DiffieHellmanParams {
             EDFE72FE 9B6AA4BD 7B5A0F1C 71CFFF4C 19C418E1 F6EC0179
             81BC087F 2A7065B3 84B890D3 191F2BFA
         ")),
-        subgroup_size_bytes: 224/8,
+        subgroup_size: boxed_uint_from_be_slice(&hex!("
+            801C0D34 C58D93FE 99717710 1F80535A 4738CEBC BF389A99
+            B36371EB
+        ")),
     }
 }
 
@@ -92,6 +97,9 @@ pub fn get_2048_modp_256_po() -> DiffieHellmanParams {
             184B523D 1DB246C3 2F630784 90F00EF8 D647D148 D4795451
             5E2327CF EF98C582 664B4C0F 6CC41659
         ")),
-        subgroup_size_bytes: 256/8,
+        subgroup_size: boxed_uint_from_be_slice(&hex!("
+            8CF83642 A709A097 B4479976 40129DA2 99B1A47D 1EB3750B
+            A308B0FE 64F5FBD3
+        ")),
     }
 }

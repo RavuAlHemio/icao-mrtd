@@ -19,6 +19,7 @@ pub fn get_nist_p192() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("188da80eb03090f67cbf20eb43a18800f4ff0afd82ff1012")),
             boxed_uint_from_be_slice(&hex!("07192b95ffc8da78631011ed6b24cdd573f977a11e794811")),
         ),
+        1,
     )
 }
 
@@ -31,6 +32,7 @@ pub fn get_nist_p224() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("b70e0cbd6bb4bf7f321390b94a03c1d356c21122343280d6115c1d21")),
             boxed_uint_from_be_slice(&hex!("bd376388b5f723fb4c22dfe6cd4375a05a07476444d5819985007e34")),
         ),
+        1,
     )
 }
 
@@ -43,6 +45,7 @@ pub fn get_nist_p256() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296")),
             boxed_uint_from_be_slice(&hex!("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")),
         ),
+        1,
     )
 }
 
@@ -55,6 +58,7 @@ pub fn get_nist_p384() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7")),
             boxed_uint_from_be_slice(&hex!("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f")),
         ),
+        1,
     )
 }
 
@@ -67,6 +71,7 @@ pub fn get_nist_p521() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("00c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66")),
             boxed_uint_from_be_slice(&hex!("011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650")),
         ),
+        1,
     )
 }
 
@@ -79,6 +84,7 @@ pub fn get_brainpool_p192r1() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("c0a0647eaab6a48753b033c56cb0f0900a2f5c4853375fd6")),
             boxed_uint_from_be_slice(&hex!("14b690866abd5bb88b5f4828c1490002e6773fa2fa299b8f")),
         ),
+        1,
     )
 }
 
@@ -91,6 +97,7 @@ pub fn get_brainpool_p224r1() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("0d9029ad2c7e5cf4340823b2a87dc68c9e4ce3174c1e6efdee12c07d")),
             boxed_uint_from_be_slice(&hex!("58aa56f772c0726f24c6b89e4ecdac24354b9e99caa3f6d3761402cd")),
         ),
+        1,
     )
 }
 
@@ -103,6 +110,7 @@ pub fn get_brainpool_p256r1() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("8bd2aeb9cb7e57cb2c4b482ffc81b7afb9de27e1e3bd23c23a4453bd9ace3262")),
             boxed_uint_from_be_slice(&hex!("547ef835c3dac4fd97f8461a14611dc9c27745132ded8e545c1d54c72f046997")),
         ),
+        1,
     )
 }
 
@@ -115,6 +123,7 @@ pub fn get_brainpool_p320r1() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("43bd7e9afb53d8b85289bcc48ee5bfe6f20137d10a087eb6e7871e2a10a599c710af8d0d39e20611")),
             boxed_uint_from_be_slice(&hex!("14fdd05545ec1cc8ab4093247f77275e0743ffed117182eaa9c77877aaac6ac7d35245d1692e8ee1")),
         ),
+        1,
     )
 }
 
@@ -127,6 +136,7 @@ pub fn get_brainpool_p384r1() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("1d1c64f068cf45ffa2a63a81b7c13f6b8847a3e77ef14fe3db7fcafe0cbd10e8e826e03436d646aaef87b2e247d4af1e")),
             boxed_uint_from_be_slice(&hex!("8abe1d7520f9c2a45cb1eb8e95cfd55262b70b29feec5864e19c054ff99129280e4646217791811142820341263c5315")),
         ),
+        1,
     )
 }
 
@@ -139,5 +149,6 @@ pub fn get_brainpool_p512r1() -> PrimeWeierstrassCurve {
             boxed_uint_from_be_slice(&hex!("81aee4bdd82ed9645a21322e9c4c6a9385ed9f70b5d916c1b43b62eef4d0098eff3b1f78e2d0d48d50d1687b93b97d5f7c6d5047406a5e688b352209bcb9f822")),
             boxed_uint_from_be_slice(&hex!("7dde385d566332ecc0eabfa9cf7822fdf209f70024a57b1aa000c55b881f8111b2dcde494a5f485e5bca4bd88a2763aed1ca2b2fa8f0540678cd1e0f3ad80892")),
         ),
+        1,
     )
 }
