@@ -290,10 +290,14 @@ pub fn obtain_encrypted_nonce(card: &mut Box<dyn SmartCard>) -> Result<Zeroizing
 }
 
 
-fn exchange_mapping_public_keys(card: &mut Box<dyn SmartCard>, public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
+/// Exchanges mapping values with the chip.
+///
+/// For generic mapping, these are the derivation public keys. For integrated mapping, this is the
+/// terminal nonce sent from the terminal to the chip and the chip answering with empty information.
+fn exchange_mapping_values(card: &mut Box<dyn SmartCard>, mapping_values: &[u8]) -> Result<Zeroizing<Vec<u8>>, CommunicationError> {
     let mut mapping_data_tlv = Zeroizing::new(vec![0x81]); // mapping data
-    encode_primitive_length(&mut mapping_data_tlv, public_key.len());
-    mapping_data_tlv.extend(public_key);
+    encode_primitive_length(&mut mapping_data_tlv, mapping_values.len());
+    mapping_data_tlv.extend(mapping_values);
 
     let mut request_data = vec![0x7C]; // dynamic authentication data
     encode_primitive_length(&mut request_data, mapping_data_tlv.len());
@@ -455,10 +459,10 @@ pub fn perform_gm_kex_with_values(
     cipher_and_mac.decrypt_padded_data(&mut nonce_bytes, &nonce_key, &nonce_iv);
     let nonce = Zeroizing::new(boxed_uint_from_be_slice(&nonce_bytes));
 
-    // derive the shared secret for generic mapping using classic Diffie-Hellman
+    // derive the shared secret for generic mapping using Diffie-Hellman
     let session_key_exchange = {
         let public_key_bytes = key_exchange.calculate_public_key(&derivation_private_key);
-        let card_public_key_bytes = exchange_mapping_public_keys(&mut card, &public_key_bytes)?;
+        let card_public_key_bytes = exchange_mapping_values(&mut card, &public_key_bytes)?;
         key_exchange.derive_generic_mapping(&nonce, &derivation_private_key, &card_public_key_bytes)
     };
 
@@ -535,6 +539,117 @@ fn perform_gm_kex(
         encrypted_nonce,
         &*derivation_private_key,
         &*session_private_key,
+    )
+}
+
+
+/// Performs an integrated mapping key exchange using specific values.
+pub fn perform_im_kex_with_values(
+    mut card: Box<dyn SmartCard>,
+    protocol: &Oid,
+    key_exchange: KeyExchange,
+    cipher_and_mac: &Box<dyn CipherAndMac>,
+    mrz_data: &[u8],
+    encrypted_nonce: &[u8],
+    terminal_nonce: &[u8],
+    session_private_key: &BoxedUint,
+) -> Result<Box<dyn SmartCard>, CommunicationError> {
+    // derive key from MRZ data
+    let mut mrz_hasher = Sha1::new();
+    mrz_hasher.update(mrz_data);
+    let mrz_hash = mrz_hasher.finalize();
+    let nonce_key = cipher_and_mac.derive_key_from_password(&mrz_hash);
+
+    // decrypt the (chip's) nonce
+    let nonce_iv = vec![0u8; cipher_and_mac.cipher_block_size()];
+    let mut nonce_bytes = Zeroizing::new(encrypted_nonce.to_vec());
+    cipher_and_mac.decrypt_padded_data(&mut nonce_bytes, &nonce_key, &nonce_iv);
+
+    // send our nonce to the chip, expecting nothing in return
+    exchange_mapping_values(&mut card, terminal_nonce)?;
+
+    // run the pseudorandom function
+    let pseudorandom_result = cipher_and_mac.integrated_mapping_pseudorandom_function(
+        &nonce_bytes,
+        terminal_nonce,
+        key_exchange.prime_order(),
+    );
+
+    // derive the session key exchange from that
+    let session_key_exchange = key_exchange.derive_integrated_mapping(&pseudorandom_result);
+
+    // key agreement with the new parameters
+    let (shared_secret_bytes, public_key_bytes, card_public_key_bytes) = {
+        let public_key_bytes = session_key_exchange.calculate_public_key(&session_private_key);
+        let card_public_key_bytes = exchange_ephemeral_public_keys(&mut card, &public_key_bytes)?;
+        if public_key_bytes.ct_eq(card_public_key_bytes.as_slice()).into() {
+            return Err(Error::DiffieHellmanKeysEqual.into());
+        }
+        let shared_secret = session_key_exchange.exchange_keys(&session_private_key, &card_public_key_bytes);
+        (shared_secret, public_key_bytes, card_public_key_bytes)
+    };
+
+    // derive keys
+    let k_session_enc = cipher_and_mac.derive_encryption_key(&shared_secret_bytes);
+    let k_session_mac = cipher_and_mac.derive_mac_key(&shared_secret_bytes);
+
+    // mutual authentication
+    let outgoing_token = calculate_mutual_token(
+        cipher_and_mac,
+        protocol,
+        key_exchange.public_key_tag(),
+        &card_public_key_bytes,
+        &k_session_mac,
+    );
+    let expected_token = calculate_mutual_token(
+        cipher_and_mac,
+        protocol,
+        key_exchange.public_key_tag(),
+        &public_key_bytes,
+        &k_session_mac,
+    );
+    let incoming_token = mutual_authentication(&mut card, &outgoing_token)?;
+    if !bool::from(incoming_token.ct_eq(&expected_token)) {
+        return Err(Error::MutualAuthentication.into());
+    }
+
+    // set up secure messaging
+    // the initial send sequence counter is all-zeroes for PACE
+    let send_sequence_counter = vec![0u8; cipher_and_mac.cipher_block_size()];
+    Ok(cipher_and_mac.create_secure_messaging(
+        card,
+        &k_session_enc,
+        &k_session_mac,
+        &send_sequence_counter,
+    ))
+}
+
+
+/// Performs an integrated mapping key exchange.
+fn perform_im_kex(
+    card: Box<dyn SmartCard>,
+    protocol: &Oid,
+    key_exchange: KeyExchange,
+    cipher_and_mac: &Box<dyn CipherAndMac>,
+    mrz_data: &[u8],
+    encrypted_nonce: &[u8],
+) -> Result<Box<dyn SmartCard>, CommunicationError> {
+    let mut terminal_nonce = Zeroizing::new(vec![0u8; cipher_and_mac.cipher_block_size()]);
+    OsRng.fill_bytes(terminal_nonce.as_mut_slice());
+
+    let mut session_private_key_bytes = Zeroizing::new(vec![0u8; key_exchange.private_key_len_bytes()]);
+    OsRng.fill_bytes(session_private_key_bytes.as_mut_slice());
+    let session_private_key = Zeroizing::new(boxed_uint_from_be_slice(&session_private_key_bytes));
+
+    perform_im_kex_with_values(
+        card,
+        protocol,
+        key_exchange,
+        cipher_and_mac,
+        mrz_data,
+        encrypted_nonce,
+        &terminal_nonce,
+        &session_private_key,
     )
 }
 

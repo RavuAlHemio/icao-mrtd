@@ -39,6 +39,14 @@ pub enum KeyExchange {
     PrimeWeierstrassEllipticDiffieHellman(PrimeWeierstrassCurve),
 }
 impl KeyExchange {
+    /// Returns the prime order of this key exchange method.
+    pub fn prime_order(&self) -> &BoxedUint {
+        match self {
+            Self::DiffieHellman(dhp) => dhp.prime(),
+            Self::PrimeWeierstrassEllipticDiffieHellman(curve) => curve.prime(),
+        }
+    }
+
     /// Returns the recommended number of bytes for a private key using this key exchange method.
     pub fn private_key_len_bytes(&self) -> usize {
         match self {
@@ -117,6 +125,34 @@ impl KeyExchange {
                 let other_public_key_point = AffinePoint::try_from_be_bytes(other_public_key).unwrap();
                 let shared_secret_point = curve.diffie_hellman(private_key, &other_public_key_point).unwrap();
                 Self::PrimeWeierstrassEllipticDiffieHellman(curve.derive_generic_mapping_session_curve(nonce, &shared_secret_point))
+            },
+        }
+    }
+
+    /// Derives a new key exchange method using integrated mapping.
+    ///
+    /// The integrated mapping process keeps the same parameters but derives a new generator using
+    /// the result of a pseudorandom function that depends on the values of two nonces and the
+    /// encryption algorithm used.
+    pub fn derive_integrated_mapping(&self, pseudorandom_result: &BoxedUint) -> Self {
+        match self {
+            Self::DiffieHellman(dhp) => {
+                let new_generator = dhp.derive_integrated_mapping_generator(pseudorandom_result);
+                Self::DiffieHellman(DiffieHellmanParams::new(
+                    dhp.prime().clone(),
+                    (&*new_generator).clone(),
+                    dhp.subgroup_size().clone(),
+                ))
+            },
+            Self::PrimeWeierstrassEllipticDiffieHellman(curve) => {
+                let new_generator = curve.derive_integrated_mapping_generator(pseudorandom_result);
+                Self::PrimeWeierstrassEllipticDiffieHellman(PrimeWeierstrassCurve::new(
+                    curve.prime().clone(),
+                    curve.coefficient_a().clone(),
+                    curve.coefficient_b().clone(),
+                    new_generator,
+                    curve.cofactor(),
+                ))
             },
         }
     }
