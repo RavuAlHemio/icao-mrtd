@@ -45,6 +45,7 @@ pub enum Error {
     },
     ResponseMac,
     ValueMismatch { value: MismatchedValue },
+    FailedOuterResponse { response: Response },
     ResponseTlvFormat,
     MissingResponseMac,
     MissingResponseData,
@@ -64,6 +65,8 @@ impl fmt::Display for Error {
                 => write!(f, "response MAC incorrect"),
             Self::ValueMismatch { value }
                 => write!(f, "{:?} mismatched", value),
+            Self::FailedOuterResponse { response }
+                => write!(f, "secure messaging outer response unsucessful: {:?}", response),
             Self::ResponseTlvFormat
                 => write!(f, "response has an invalid TLV format"),
             Self::MissingResponseMac
@@ -88,6 +91,7 @@ impl std::error::Error for Error {
             Self::LengthMismatch { .. } => None,
             Self::ResponseMac => None,
             Self::ValueMismatch { .. } => None,
+            Self::FailedOuterResponse { .. } => None,
             Self::ResponseTlvFormat => None,
             Self::MissingResponseMac => None,
             Self::MissingResponseData => None,
@@ -303,6 +307,13 @@ pub trait SecureMessaging {
             card.communicate(&my_request)?
         };
 
+        // increment the SSC since we received a response
+        let ssc_for_received = self.increment_send_sequence_counter();
+
+        if response.trailer.to_word() != 0x9000 {
+            return Err(Error::FailedOuterResponse { response }.into());
+        }
+
         // decode the raw response
         let mut received_fields = Vec::new();
         let mut response_slice = response.data.as_slice();
@@ -341,9 +352,6 @@ pub trait SecureMessaging {
         let Some(received_mac) = received_mac_opt else {
             return Err(Error::MissingResponseMac.into());
         };
-
-        // increment the SSC
-        let ssc_for_received = self.increment_send_sequence_counter();
 
         // verify MAC
         let mut data = Zeroizing::new(Vec::new());
