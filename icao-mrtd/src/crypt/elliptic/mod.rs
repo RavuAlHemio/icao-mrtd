@@ -418,14 +418,24 @@ impl PrimeWeierstrassCurve {
     }
 
     pub fn diffie_hellman(&self, private_key: &BoxedUint, other_public_key: &AffinePoint) -> CtOption<AffinePoint> {
-        // secret_key = private_key * other_public_key
+        // in theory: secret_key = private_key * other_public_key
+        // in practice (to defend against pubkeys that are points on the curve but not members of the subgroup):
+        // * derived_public_key = cofactor * other_public_key
+        // * (private_key * inverse_cofactor) * derived_public_key
+        // this variant is documented e.g. in TR-03111 § 4.3.1
+
         let monty = self.monty_knowledge();
+        let priv_monty = BoxedMontyForm::new(private_key.clone(), monty.params.clone());
         let other_pub = Self::internal_affine_to_monty_projective(&monty, other_public_key);
 
         // defend against skullduggery: check if other public key is on the curve
         let is_other_pub_on_curve = Self::internal_is_on_curve(&monty, &other_pub);
 
-        let product = self.internal_multiply_scalar_with_point(&monty, private_key, &other_pub);
+        let big_cofactor = BoxedMontyForm::new(BoxedUint::from(self.cofactor()).widen(self.prime().bits()), monty.params.clone());
+        let cofactor_inv = big_cofactor.invert().unwrap();
+        let derived_public_key = self.internal_multiply_scalar_with_point(&monty, &big_cofactor.retrieve(), &other_pub);
+        let private_scalar = priv_monty.mul(&cofactor_inv);
+        let product = self.internal_multiply_scalar_with_point(&monty, &private_scalar.retrieve(), &derived_public_key);
 
         let (x, y) = Self::internal_monty_projective_to_affine(&product)
             .unwrap();
