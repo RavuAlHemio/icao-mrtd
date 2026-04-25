@@ -8,12 +8,12 @@ pub mod oids;
 use std::fmt;
 
 use crypto_bigint::BoxedUint;
+use ctutils::CtEq;
 use digest::Digest;
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use rasn::types::{Any, ObjectIdentifier, Oid, SetOf};
 use sha1::Sha1;
-use subtle::ConstantTimeEq;
 use tracing::instrument;
 use zeroize::Zeroizing;
 
@@ -553,11 +553,11 @@ fn perform_gm_kex(
     encrypted_nonce: &[u8],
 ) -> Result<Box<dyn SmartCard>, CommunicationError> {
     let mut derivation_private_key_bytes = Zeroizing::new(vec![0u8; key_exchange.private_key_len_bytes()]);
-    OsRng.fill_bytes(derivation_private_key_bytes.as_mut_slice());
+    SysRng.try_fill_bytes(derivation_private_key_bytes.as_mut_slice()).unwrap();
     let derivation_private_key = Zeroizing::new(boxed_uint_from_be_slice(&derivation_private_key_bytes));
 
     let mut session_private_key_bytes = Zeroizing::new(vec![0u8; key_exchange.private_key_len_bytes()]);
-    OsRng.fill_bytes(session_private_key_bytes.as_mut_slice());
+    SysRng.try_fill_bytes(session_private_key_bytes.as_mut_slice()).unwrap();
     let session_private_key = Zeroizing::new(boxed_uint_from_be_slice(&session_private_key_bytes));
 
     perform_gm_kex_with_values(
@@ -667,10 +667,10 @@ fn perform_im_kex(
     encrypted_nonce: &[u8],
 ) -> Result<Box<dyn SmartCard>, CommunicationError> {
     let mut terminal_nonce = Zeroizing::new(vec![0u8; cipher_and_mac.cipher_block_size()]);
-    OsRng.fill_bytes(terminal_nonce.as_mut_slice());
+    SysRng.try_fill_bytes(terminal_nonce.as_mut_slice()).unwrap();
 
     let mut session_private_key_bytes = Zeroizing::new(vec![0u8; key_exchange.private_key_len_bytes()]);
-    OsRng.fill_bytes(session_private_key_bytes.as_mut_slice());
+    SysRng.try_fill_bytes(session_private_key_bytes.as_mut_slice()).unwrap();
     let session_private_key = Zeroizing::new(boxed_uint_from_be_slice(&session_private_key_bytes));
 
     perform_im_kex_with_values(

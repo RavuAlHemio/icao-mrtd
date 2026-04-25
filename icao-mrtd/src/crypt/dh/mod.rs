@@ -4,13 +4,13 @@
 pub mod params;
 
 
-use crypto_bigint::{BoxedUint, NonZero};
+use crypto_bigint::{BoxedUint, NonZero, Resize};
 use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
 use zeroize::Zeroizing;
 use zeroize_derive::ZeroizeOnDrop;
 
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub struct DiffieHellmanParams {
     /// The prime or modulus.
     prime: BoxedUint,
@@ -53,7 +53,7 @@ impl DiffieHellmanParams {
     pub fn calculate_public_key(&self, private_key: &BoxedUint) -> Zeroizing<BoxedUint> {
         // pubkey = generator ** private_key mod prime
         let monty_params = BoxedMontyParams::new(self.prime.to_odd().unwrap());
-        let monty_generator = BoxedMontyForm::new(self.generator.clone(), monty_params);
+        let monty_generator = BoxedMontyForm::new(self.generator.clone(), &monty_params);
         let public_key = monty_generator.pow(private_key).retrieve();
         Zeroizing::new(public_key)
     }
@@ -62,7 +62,7 @@ impl DiffieHellmanParams {
     pub fn diffie_hellman(&self, private_key: &BoxedUint, other_public_key: &BoxedUint) -> Zeroizing<BoxedUint> {
         // secret = other_public_key ** private_key mod prime
         let monty_params = BoxedMontyParams::new(self.prime.to_odd().unwrap());
-        let monty_other_public = BoxedMontyForm::new(other_public_key.clone(), monty_params);
+        let monty_other_public = BoxedMontyForm::new(other_public_key.clone(), &monty_params);
         let secret = monty_other_public.pow(private_key).retrieve();
         Zeroizing::new(secret)
     }
@@ -76,8 +76,8 @@ impl DiffieHellmanParams {
     /// ```
     pub fn derive_generic_mapping(&self, nonce: &BoxedUint, shared_secret: &BoxedUint) -> Self {
         let monty_params = BoxedMontyParams::new(self.prime().to_odd().unwrap());
-        let generator_monty = BoxedMontyForm::new(self.generator().clone(), monty_params.clone());
-        let shared_secret_monty = BoxedMontyForm::new(shared_secret.clone(), monty_params.clone());
+        let generator_monty = BoxedMontyForm::new(self.generator().clone(), &monty_params);
+        let shared_secret_monty = BoxedMontyForm::new(shared_secret.clone(), &monty_params);
 
         let new_generator_monty = generator_monty.pow(nonce).mul(&shared_secret_monty);
         let new_generator = new_generator_monty.retrieve();
@@ -86,14 +86,14 @@ impl DiffieHellmanParams {
 
     /// Derives a new generator using integrated mapping from the given pseudorandom function result.
     pub fn derive_integrated_mapping_generator(&self, pseudorandom_result: &BoxedUint) -> Zeroizing<BoxedUint> {
-        let one = BoxedUint::one().widen(self.prime().bits());
+        let one = BoxedUint::one().resize(self.prime().bits());
         let prime_minus_one = self.prime() - &one;
         let bit_count = prime_minus_one.bits().max(self.subgroup_size().bits());
-        let a = prime_minus_one.widen(bit_count) / NonZero::new(self.subgroup_size().widen(bit_count)).unwrap();
+        let a = prime_minus_one.resize(bit_count) / NonZero::new(self.subgroup_size().resize(bit_count)).unwrap();
 
         let monty_params = BoxedMontyParams::new(self.prime().to_odd().unwrap());
-        let pseudorandom_monty = BoxedMontyForm::new(pseudorandom_result.clone(), monty_params.clone());
-        let one_monty = BoxedMontyForm::new(one.clone(), monty_params.clone());
+        let pseudorandom_monty = BoxedMontyForm::new(pseudorandom_result.clone(), &monty_params);
+        let one_monty = BoxedMontyForm::new(one.clone(), &monty_params);
 
         let ret = pseudorandom_monty.pow(&a);
         assert_ne!(&ret, &one_monty);

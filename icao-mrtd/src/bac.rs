@@ -1,10 +1,10 @@
 //! Basic Access Control.
 
 
-use block_padding::{Iso7816, RawPadding};
+use block_padding::{Iso7816, Padding};
 use digest::Digest;
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use sha1::Sha1;
 use tracing::instrument;
 
@@ -163,8 +163,8 @@ pub fn establish(mut card: Box<dyn SmartCard>, mrz_data: &[u8]) -> Result<Box<dy
     // generate some random bytes
     let mut rnd_ifd = [0u8; 8];
     let mut k_ifd = [0u8; 16];
-    OsRng.fill_bytes(&mut rnd_ifd);
-    OsRng.fill_bytes(&mut k_ifd);
+    SysRng.try_fill_bytes(&mut rnd_ifd).unwrap();
+    SysRng.try_fill_bytes(&mut k_ifd).unwrap();
 
     establish_from_values(card, k_seed, &rnd_ic, &rnd_ifd, &k_ifd)
 }

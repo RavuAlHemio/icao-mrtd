@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use subtle::ConstantTimeEq;
+use ctutils::CtEq;
 use tracing::{debug, instrument};
 use zeroize::Zeroizing;
 use zeroize_derive::ZeroizeOnDrop;

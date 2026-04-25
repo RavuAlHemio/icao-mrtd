@@ -1,7 +1,7 @@
 //! ASN.1 structures relevant to PACE.
 
 
-use rasn::{AsnType, Decode, Encode};
+use rasn::{AsnType, Decode, Decoder, Encode};
 use rasn::types::{Any, Integer, ObjectIdentifier};
 
 

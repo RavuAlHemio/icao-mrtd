@@ -5,14 +5,14 @@ use aes::{Aes128, Aes192, Aes256};
 use block_padding::NoPadding;
 use cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use cmac::Cmac;
-use crypto_bigint::{BoxedUint, NonZero};
+use crypto_bigint::{BoxedUint, NonZero, Resize};
+use ctutils::CtEq;
 use des::{Des, TdesEde2};
 use digest::{Digest, DynDigest, KeyInit, Mac};
 use hex_literal::hex;
 use retail_mac::RetailMac;
 use sha1::Sha1;
 use sha2::Sha256;
-use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::iso7816::card::SmartCard;
@@ -128,7 +128,7 @@ pub trait CipherAndMac {
             &output_buf,
             ret_width,
         ).expect("failed to assemble result");
-        let ret_num = output_num.rem(&NonZero::new(prime_order.widen(ret_width)).unwrap());
+        let ret_num = output_num.rem(&NonZero::new(prime_order.resize(ret_width)).unwrap());
         Zeroizing::new(ret_num)
     }
 }

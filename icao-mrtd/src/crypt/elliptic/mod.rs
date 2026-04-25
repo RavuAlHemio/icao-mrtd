@@ -6,9 +6,9 @@ pub mod curves;
 
 use std::ops::{Add, Mul};
 
-use crypto_bigint::{BoxedUint, Integer, NonZero};
+use crypto_bigint::{BoxedUint, Integer, NonZero, Resize};
 use crypto_bigint::modular::{BoxedMontyForm, BoxedMontyParams};
-use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
+use ctutils::{Choice, CtEq, CtOption, CtSelect};
 use zeroize::Zeroizing;
 use zeroize_derive::ZeroizeOnDrop;
 
@@ -16,7 +16,7 @@ use crate::crypt::boxed_uint_from_be_slice;
 
 
 /// A point in affine coordinates.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub struct AffinePoint {
     x: BoxedUint,
     y: BoxedUint,
@@ -99,7 +99,7 @@ struct MontyKnowledge {
 }
 
 /// An elliptic curve of the form `y**2 ≡ x**3 + ax + b` modulo a prime number.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub struct PrimeWeierstrassCurve {
     /// The prime (modulus) of the curve.
     prime: BoxedUint,
@@ -171,8 +171,8 @@ impl PrimeWeierstrassCurve {
         let monty_params = BoxedMontyParams::new(self.prime.to_odd().unwrap());
         MontyKnowledge {
             params: monty_params.clone(),
-            a: BoxedMontyForm::new(self.coefficient_a.clone(), monty_params.clone()),
-            b: BoxedMontyForm::new(self.coefficient_b.clone(), monty_params.clone()),
+            a: BoxedMontyForm::new(self.coefficient_a.clone(), &monty_params),
+            b: BoxedMontyForm::new(self.coefficient_b.clone(), &monty_params),
         }
     }
 
@@ -189,13 +189,13 @@ impl PrimeWeierstrassCurve {
         let ax = (&x).mul(&monty.a);
         let rhs = (&x_cubed).add(&ax).add(&monty.b);
         let are_equal = y_squared.retrieve().ct_eq(&rhs.retrieve());
-        Choice::conditional_select(&Choice::from(0), &are_equal, inverse_option.is_some())
+        Choice::ct_select(&Choice::from(0), &are_equal, inverse_option.is_some())
     }
 
     fn internal_affine_to_monty_projective(monty: &MontyKnowledge, point: &AffinePoint) -> MontyProjectivePoint {
-        let x = BoxedMontyForm::new(point.x.clone(), monty.params.clone());
-        let y = BoxedMontyForm::new(point.y.clone(), monty.params.clone());
-        let z = BoxedMontyForm::one(monty.params.clone());
+        let x = BoxedMontyForm::new(point.x.clone(), &monty.params);
+        let y = BoxedMontyForm::new(point.y.clone(), &monty.params);
+        let z = BoxedMontyForm::one(&monty.params);
         MontyProjectivePoint::new(x, y, z)
     }
 
@@ -367,9 +367,9 @@ impl PrimeWeierstrassCurve {
     }
 
     fn internal_point_at_infinity(monty: &MontyKnowledge) -> MontyProjectivePoint {
-        let x = BoxedMontyForm::zero(monty.params.clone());
-        let y = BoxedMontyForm::one(monty.params.clone());
-        let z = BoxedMontyForm::zero(monty.params.clone());
+        let x = BoxedMontyForm::zero(&monty.params);
+        let y = BoxedMontyForm::one(&monty.params);
+        let z = BoxedMontyForm::zero(&monty.params);
         MontyProjectivePoint { x, y, z }
     }
 
@@ -425,13 +425,13 @@ impl PrimeWeierstrassCurve {
         // this variant is documented e.g. in TR-03111 § 4.3.1
 
         let monty = self.monty_knowledge();
-        let priv_monty = BoxedMontyForm::new(private_key.clone(), monty.params.clone());
+        let priv_monty = BoxedMontyForm::new(private_key.clone(), &monty.params);
         let other_pub = Self::internal_affine_to_monty_projective(&monty, other_public_key);
 
         // defend against skullduggery: check if other public key is on the curve
         let is_other_pub_on_curve = Self::internal_is_on_curve(&monty, &other_pub);
 
-        let big_cofactor = BoxedMontyForm::new(BoxedUint::from(self.cofactor()).widen(self.prime().bits()), monty.params.clone());
+        let big_cofactor = BoxedMontyForm::new(BoxedUint::from(self.cofactor()).resize(self.prime().bits()), &monty.params);
         let cofactor_inv = big_cofactor.invert().unwrap();
         let derived_public_key = self.internal_multiply_scalar_with_point(&monty, &big_cofactor.retrieve(), &other_pub);
         let private_scalar = priv_monty.mul(&cofactor_inv);
@@ -484,8 +484,8 @@ impl PrimeWeierstrassCurve {
         }
 
         let monty = self.monty_knowledge();
-        let pseudorandom_monty = BoxedMontyForm::new(pseudorandom_result.clone(), monty.params.clone());
-        let one_monty = BoxedMontyForm::one(monty.params.clone());
+        let pseudorandom_monty = BoxedMontyForm::new(pseudorandom_result.clone(), &monty.params);
+        let one_monty = BoxedMontyForm::one(&monty.params);
         let prime_minus_two = self.prime() - &two;
 
         // step 1

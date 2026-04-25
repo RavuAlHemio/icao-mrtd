@@ -33,7 +33,7 @@ use crate::crypt::elliptic::PrimeWeierstrassCurve;
 /// Both coordinates are encoded in the same number of bytes as the expected length of a private key
 /// on the curve; the coordinates can be extracted by stripping the leading `0x04` byte and
 /// splitting the resulting byte string in the middle.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, ZeroizeOnDrop)]
 pub enum KeyExchange {
     DiffieHellman(DiffieHellmanParams),
     PrimeWeierstrassEllipticDiffieHellman(PrimeWeierstrassCurve),
